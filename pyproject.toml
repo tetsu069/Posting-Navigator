@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "posting-navigator"
+version = "0.5.0"
+description = "KMZ町丁目境界とOpenStreetMap道路からポスティング巡回ルートを生成するCLI・Webアプリ"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "lxml>=5.0",
+  "networkx>=3.2",
+  "pyproj>=3.6",
+  "requests>=2.31",
+  "shapely>=2.0",
+  "flask>=3.0",
+  "flask-cors>=4.0",
+  "gunicorn>=22.0",
+]
+
+[project.scripts]
+posting-navigator = "posting_navigator.cli:main"
+posting-navigator-web = "posting_navigator.webapp:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

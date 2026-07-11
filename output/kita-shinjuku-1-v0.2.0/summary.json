@@ -1,0 +1,14 @@
+{
+  "source_edges": 107,
+  "route_edges": 145,
+  "source_length_m": 6622.1,
+  "route_length_m": 8668.8,
+  "duplicated_length_m": 2046.7,
+  "major_road_duplicated_m": 0,
+  "duplication_ratio": 1.309,
+  "connected_nodes": 75,
+  "dead_end_count": 30,
+  "start_lon": 139.692209,
+  "start_lat": 35.700686,
+  "data_mode": "offline-fixture"
+}

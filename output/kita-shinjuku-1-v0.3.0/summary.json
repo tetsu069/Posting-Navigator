@@ -1,0 +1,57 @@
+{
+  "source_edges": 107,
+  "route_edges": 145,
+  "source_length_m": 6622.1,
+  "route_length_m": 8668.8,
+  "duplicated_length_m": 2046.7,
+  "major_road_duplicated_m": 0,
+  "duplication_ratio": 1.309,
+  "connected_nodes": 75,
+  "dead_end_count": 30,
+  "start_lon": 139.692209,
+  "start_lat": 35.700686,
+  "data_mode": "offline-fixture",
+  "worker_count": 4,
+  "assignments": [
+    {
+      "worker_id": 1,
+      "name": "担当01",
+      "length_m": 2167.2,
+      "start_lon": 139.692209,
+      "start_lat": 35.700686,
+      "end_lon": 139.694292,
+      "end_lat": 35.70083876841899,
+      "difference_from_average_m": 0.0
+    },
+    {
+      "worker_id": 2,
+      "name": "担当02",
+      "length_m": 2167.2,
+      "start_lon": 139.694292,
+      "start_lat": 35.70083876841899,
+      "end_lon": 139.693251,
+      "end_lat": 35.69994158541247,
+      "difference_from_average_m": 0.0
+    },
+    {
+      "worker_id": 3,
+      "name": "担当03",
+      "length_m": 2167.2,
+      "start_lon": 139.693251,
+      "start_lat": 35.69994158541247,
+      "end_lon": 139.6937141824518,
+      "end_lat": 35.697506,
+      "difference_from_average_m": 0.0
+    },
+    {
+      "worker_id": 4,
+      "name": "担当04",
+      "length_m": 2167.2,
+      "start_lon": 139.6937141824518,
+      "start_lat": 35.697506,
+      "end_lon": 139.692209,
+      "end_lat": 35.700686,
+      "difference_from_average_m": 0.0
+    }
+  ]
+}

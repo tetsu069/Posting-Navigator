@@ -1,0 +1,8 @@
+lxml>=5.0
+networkx>=3.2
+pyproj>=3.6
+requests>=2.31
+shapely>=2.0
+flask>=3.0
+flask-cors>=4.0
+gunicorn>=22.0

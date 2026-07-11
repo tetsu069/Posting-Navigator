@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: posting-navigator-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -e .
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --timeout 300 posting_navigator.webapp:app
+    healthCheckPath: /api/health
+    envVars:
+      - key: ALLOWED_ORIGINS
+        value: https://YOUR-GITHUB-USER.github.io
+      - key: MAX_UPLOAD_MB
+        value: 25

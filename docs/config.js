@@ -1,0 +1,1 @@
+window.POSTING_NAVIGATOR_API = 'https://YOUR-POSTING-NAVIGATOR-API.onrender.com';

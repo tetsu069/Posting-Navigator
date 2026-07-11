@@ -1,0 +1,9 @@
+{
+  "source_edges": 107,
+  "route_edges": 145,
+  "source_length_m": 6622.1,
+  "route_length_m": 8668.8,
+  "duplication_ratio": 1.309,
+  "connected_nodes": 75,
+  "data_mode": "offline-fixture"
+}

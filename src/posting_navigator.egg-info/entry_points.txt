@@ -1,0 +1,3 @@
+[console_scripts]
+posting-navigator = posting_navigator.cli:main
+posting-navigator-web = posting_navigator.webapp:main
