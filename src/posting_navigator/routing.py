@@ -216,7 +216,7 @@ def _axis_diff_deg(a: float, b: float) -> float:
     return min(d, 180.0 - d)
 
 
-def _safe_snap_pair(graph: nx.MultiGraph, a: tuple[float, float], b: tuple[float, float], max_gap_m: float) -> bool:
+def _safe_snap_pair(graph: nx.MultiGraph, a: tuple[float, float], b: tuple[float, float], max_gap_m: float, strict_long_gap: bool = False) -> bool:
     """Decide whether a 1.25-3m gap is a likely broken junction, not parallel roads."""
     gap = _dist_m(a, b)
     if gap <= 1.25 or gap > max_gap_m:
@@ -235,6 +235,13 @@ def _safe_snap_pair(graph: nx.MultiGraph, a: tuple[float, float], b: tuple[float
     a_align = min(_axis_diff_deg(x, gap_axis) for x in aa)
     b_align = min(_axis_diff_deg(x, gap_axis) for x in bb)
     cross = min(_axis_diff_deg(x, y) for x in aa for y in bb)
+    # v1.0.21: 3mを超える救済は「同一道路の切れ目」に限定する。
+    # 両端が行き止まりで、両側の道路軸がギャップ方向を向き、かつ互いに
+    # ほぼ同一直線の場合だけ許可する。近接並行道路・道路を横切る短絡は拒否。
+    if strict_long_gap or gap > 3.0:
+        if graph.degree(a) != 1 or graph.degree(b) != 1:
+            return False
+        return a_align <= 22.0 and b_align <= 22.0 and cross <= 25.0
     # Normal broken continuation: at least one road points toward the gap.
     # Perpendicular junctions can also be rescued when the two road axes are
     # clearly different.  Two side-by-side parallel roads are rejected.
@@ -283,7 +290,7 @@ def _rebuild_graph_with_mapping(graph: nx.MultiGraph, mapping: dict[tuple[float,
     return out
 
 
-def _conditional_snap_components(graph: nx.MultiGraph, max_gap_m: float = 3.0) -> nx.MultiGraph:
+def _conditional_snap_components(graph: nx.MultiGraph, max_gap_m: float = 3.0, min_gap_m: float = 1.25, strict_long_gap: bool = False) -> nx.MultiGraph:
     """Low-memory one-pass rescue snapping for small false OSM junction gaps.
 
     Strict sub-1.25m snapping has already happened in ``build_graph``.  This
@@ -292,7 +299,7 @@ def _conditional_snap_components(graph: nx.MultiGraph, max_gap_m: float = 3.0) -
     directions indicate the same junction.  Candidate pairs are chosen first,
     then the graph is rebuilt once.  No straight connector edge is invented.
     """
-    if max_gap_m <= 1.25 or graph.number_of_nodes() < 2:
+    if max_gap_m <= min_gap_m or graph.number_of_nodes() < 2:
         return graph
 
     comps = [set(c) for c in nx.connected_components(graph)]
@@ -318,7 +325,7 @@ def _conditional_snap_components(graph: nx.MultiGraph, max_gap_m: float = 3.0) -
                     if node_comp[a] == node_comp[b]:
                         continue
                     gap = _dist_m(a, b)
-                    if 1.25 < gap <= max_gap_m and _safe_snap_pair(graph, a, b, max_gap_m):
+                    if min_gap_m < gap <= max_gap_m and _safe_snap_pair(graph, a, b, max_gap_m, strict_long_gap=strict_long_gap):
                         possible.append((gap, a, b))
         buckets.setdefault((ix, iy), []).append(a)
 
@@ -793,6 +800,13 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
     connector_source = _dedupe_roads_by_geometry(list(connector_roads or roads) + list(target_roads))
     connector_graph = build_graph(connector_source, simplify=False, snap_tolerance_m=1.25)
     connector_graph = _conditional_snap_components(connector_graph, max_gap_m=3.0)
+    # v1.0.21: 3〜8mのOSM/クリップ由来ギャップを第二段階で救済。
+    # 長距離側は非常に厳しい「同一直線のdangling endpoint同士」判定のみ。
+    # 新しいconnector edgeは作らず、既存道路端点を共通nodeへ揃える。
+    if nx.number_connected_components(connector_graph) > 1:
+        connector_graph = _conditional_snap_components(
+            connector_graph, max_gap_m=8.0, min_gap_m=3.0, strict_long_gap=True
+        )
     _mark_posting_targets(connector_graph, target_roads)
     source_graph = _posting_subgraph(connector_graph)
     component_sets = _component_order(source_graph, start_point)

@@ -49,3 +49,26 @@ def test_many_components_snap_pass_has_bounded_peak_memory():
     assert h.number_of_edges() == g.number_of_edges()
     # Python-level allocations should stay comfortably below Render's 512MB.
     assert peak < 80 * 1024 * 1024
+
+
+def test_5_9m_collinear_dangling_gap_connects_in_strict_second_pass():
+    # ~5.9m longitude gap around Tokyo latitude.
+    dx = 0.000065
+    g = nx.MultiGraph()
+    a0,a1=(139.0,35.7),(139.001,35.7)
+    b0,b1=(139.001+dx,35.7),(139.002,35.7)
+    for u,v in [(a0,a1),(b0,b1)]:
+        geom=LineString([u,v])
+        g.add_edge(u,v,geometry=geom,length=100,route_cost=100,highway='residential')
+    h = _conditional_snap_components(g, 8.0, min_gap_m=3.0, strict_long_gap=True)
+    assert nx.number_connected_components(h) == 1
+
+
+def test_6m_parallel_gap_is_not_connected_in_strict_second_pass():
+    dy=0.000054
+    g=nx.MultiGraph()
+    for u,v in [((139.0,35.7),(139.001,35.7)),((139.0,35.7+dy),(139.001,35.7+dy))]:
+        geom=LineString([u,v])
+        g.add_edge(u,v,geometry=geom,length=100,route_cost=100,highway='residential')
+    h = _conditional_snap_components(g, 8.0, min_gap_m=3.0, strict_long_gap=True)
+    assert nx.number_connected_components(h) == 2
