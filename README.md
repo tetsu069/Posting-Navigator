@@ -1,9 +1,9 @@
-# Posting Navigator v1.0.3
+# Posting Navigator v1.0.4
 
 町丁目KMZとOpenStreetMap道路からポスティング巡回ルートを生成し、現場ではスマホGPSで配布済み区間を自動記録するWeb/PWAです。GitHub Pagesを画面、RenderをPython APIとして利用できます。
 
 
-## v1.0.3 で追加・修正
+## v1.0.4 で追加・修正
 
 - 道路網を単に色塗りする方式から、**巡回順序付きステップ列**へ変更
 - Chinese Postman方式で対象道路をできるだけ一筆書きに近く巡回
@@ -63,7 +63,7 @@ Render (posting_navigator.webapp)
 2. Render → New → Blueprint → このリポジトリを選択。
 3. `render.yaml` を適用。
 4. デプロイ後のURL（例 `https://posting-navigator-api.onrender.com`）を控える。
-5. `/api/health` を開き、`"version":"1.0.3"` を確認。
+5. `/api/health` を開き、`"version":"1.0.4"` を確認。
 
 Renderの環境変数：
 

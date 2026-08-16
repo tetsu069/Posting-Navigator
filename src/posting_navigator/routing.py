@@ -41,8 +41,62 @@ def _source_for_segment(segment: LineString, roads: list[dict]) -> dict:
     return min(roads, key=lambda road: road["geometry"].distance(midpoint))
 
 
+def _orient_coords(coords, start, end):
+    coords = list(coords)
+    if not coords:
+        return [start, end]
+    if _dist_m(coords[0], start) <= _dist_m(coords[-1], start):
+        return coords
+    return list(reversed(coords))
+
+
+def _simplify_degree_two(graph: nx.MultiGraph) -> nx.MultiGraph:
+    """OSM way の単なる形状点(degree=2)を交差点扱いしないよう圧縮する。
+
+    これにより巡回ステップは「数mごとの線分」ではなく、概ね交差点〜交差点の道路区間になる。
+    """
+    g = graph.copy()
+    changed = True
+    while changed:
+        changed = False
+        for n in list(g.nodes):
+            if n not in g or g.degree(n) != 2:
+                continue
+            incident = list(g.edges(n, keys=True, data=True))
+            if len(incident) != 2:
+                continue
+            e1, e2 = incident
+            _, a, k1, d1 = e1
+            _, b, k2, d2 = e2
+            if a == b or a == n or b == n:
+                continue
+            # 並行辺などで曖昧になる場合は圧縮しない。
+            if g.number_of_edges(n, a) != 1 or g.number_of_edges(n, b) != 1:
+                continue
+            c1 = _orient_coords(d1.get("geometry", [n, a]).coords if hasattr(d1.get("geometry"), "coords") else [n, a], a, n)
+            c2 = _orient_coords(d2.get("geometry", [n, b]).coords if hasattr(d2.get("geometry"), "coords") else [n, b], n, b)
+            coords = c1 + c2[1:]
+            highway = d1.get("highway") if d1.get("highway") == d2.get("highway") else (d1.get("highway") or d2.get("highway") or "")
+            name = d1.get("name") if d1.get("name") == d2.get("name") else (d1.get("name") or d2.get("name") or "")
+            osm_id = d1.get("osm_id") if d1.get("osm_id") == d2.get("osm_id") else None
+            data = {
+                "length": float(d1.get("length", 0)) + float(d2.get("length", 0)),
+                "route_cost": float(d1.get("route_cost", 0)) + float(d2.get("route_cost", 0)),
+                "highway": highway, "name": name, "osm_id": osm_id,
+                "geometry": LineString(coords),
+            }
+            g.remove_edge(n, a, k1)
+            g.remove_edge(n, b, k2)
+            if n in g and g.degree(n) == 0:
+                g.remove_node(n)
+            g.add_edge(a, b, **data)
+            changed = True
+            break
+    return g
+
+
 def build_graph(roads: list[dict]) -> nx.MultiGraph:
-    """道路を交差点でnode化し、全連結成分を保持したMultiGraphへ変換する。"""
+    """道路を実交差点でnode化し、全連結成分を保持したMultiGraphへ変換する。"""
     if not roads:
         raise ValueError("道路データが空です")
     graph = nx.MultiGraph()
@@ -68,11 +122,11 @@ def build_graph(roads: list[dict]) -> nx.MultiGraph:
                 highway=highway,
                 name=source.get("name", ""),
                 osm_id=source.get("id"),
+                geometry=segment,
             )
     if graph.number_of_edges() == 0:
         raise ValueError("道路グラフが空です")
-    return graph
-
+    return _simplify_degree_two(graph)
 
 def _nearest_node(g: nx.MultiGraph, point: tuple[float, float] | None) -> tuple[float, float]:
     if point is None:
@@ -128,13 +182,22 @@ def _component_order(graph: nx.MultiGraph, start_point: tuple[float, float] | No
     return order
 
 
+def _oriented_edge_geometry(u, v, data: dict) -> LineString:
+    geom = data.get("geometry") if data else None
+    if geom is None:
+        return LineString([u, v])
+    coords = _orient_coords(geom.coords, u, v)
+    return LineString(coords)
+
+
 def _step(u, v, data: dict, seq: int, *, transfer: bool = False, component: int = 1) -> dict:
+    geom = LineString([u, v]) if transfer else _oriented_edge_geometry(u, v, data)
     return {
         "seq": seq,
-        "geometry": LineString([u, v]),
+        "geometry": geom,
         "from": u,
         "to": v,
-        "length_m": round(_dist_m(u, v), 1),
+        "length_m": round(sum(_dist_m(a, b) for a, b in zip(list(geom.coords), list(geom.coords)[1:])), 1),
         "highway": data.get("highway", "") if data else "",
         "name": data.get("name", "") if data else "",
         "osm_id": data.get("osm_id") if data else None,
@@ -143,6 +206,84 @@ def _step(u, v, data: dict, seq: int, *, transfer: bool = False, component: int 
         "component": component,
     }
 
+
+def _bearing(a, b) -> float:
+    lon1, lat1, lon2, lat2 = map(math.radians, [a[0], a[1], b[0], b[1]])
+    y = math.sin(lon2-lon1) * math.cos(lat2)
+    x = math.cos(lat1)*math.sin(lat2) - math.sin(lat1)*math.cos(lat2)*math.cos(lon2-lon1)
+    return (math.degrees(math.atan2(y, x)) + 360) % 360
+
+
+def _turn_label(prev_bearing: float | None, new_bearing: float) -> str:
+    if prev_bearing is None:
+        return "開始"
+    diff = ((new_bearing - prev_bearing + 540) % 360) - 180
+    if abs(diff) >= 150:
+        return "折り返し"
+    if diff >= 35:
+        return "右折"
+    if diff <= -35:
+        return "左折"
+    return "直進"
+
+
+def build_navigation_legs(steps: list[dict]) -> list[dict]:
+    """細かい巡回edgeを、地図で理解できるナビ区間へまとめる。"""
+    legs = []
+    current = None
+    for step in steps:
+        coords = list(step["geometry"].coords)
+        if len(coords) < 2:
+            continue
+        step_bearing = _bearing(coords[0], coords[-1])
+        if current is None:
+            current = {
+                "start_seq": step["seq"], "end_seq": step["seq"], "coords": coords[:],
+                "length_m": step["length_m"], "name": step.get("name", ""),
+                "transfer": step.get("transfer", False), "duplicated": step.get("duplicated", False),
+                "bearing_start": step_bearing, "bearing_end": step_bearing,
+            }
+            continue
+        diff = abs(((step_bearing - current["bearing_end"] + 540) % 360) - 180)
+        same_kind = step.get("transfer", False) == current["transfer"] and step.get("duplicated", False) == current["duplicated"]
+        same_name = bool(step.get("name")) and bool(current.get("name")) and step.get("name") == current.get("name")
+        # 同一道路、またはほぼ直進なら一つの案内区間としてまとめる。
+        can_merge = same_kind and (same_name and diff < 55 or diff < 22) and current["length_m"] < 260
+        if can_merge:
+            if current["coords"][-1] == coords[0]:
+                current["coords"].extend(coords[1:])
+            else:
+                current["coords"].extend(coords)
+            current["end_seq"] = step["seq"]
+            current["length_m"] += step["length_m"]
+            current["bearing_end"] = step_bearing
+            if not current.get("name"):
+                current["name"] = step.get("name", "")
+        else:
+            legs.append(current)
+            current = {
+                "start_seq": step["seq"], "end_seq": step["seq"], "coords": coords[:],
+                "length_m": step["length_m"], "name": step.get("name", ""),
+                "transfer": step.get("transfer", False), "duplicated": step.get("duplicated", False),
+                "bearing_start": step_bearing, "bearing_end": step_bearing,
+            }
+    if current is not None:
+        legs.append(current)
+    prev = None
+    result = []
+    for i, leg in enumerate(legs, start=1):
+        turn = _turn_label(prev, leg["bearing_start"])
+        road = leg.get("name") or ("次の道路群へ移動" if leg["transfer"] else "この道路")
+        instruction = f"{turn}：{road}を約{round(leg['length_m'])}m"
+        result.append({
+            "leg": i, "start_seq": leg["start_seq"], "end_seq": leg["end_seq"],
+            "geometry": LineString(leg["coords"]), "length_m": round(leg["length_m"], 1),
+            "name": leg.get("name", ""), "turn": turn, "instruction": instruction,
+            "bearing": round(leg["bearing_start"], 1), "transfer": leg["transfer"],
+            "duplicated": leg["duplicated"],
+        })
+        prev = leg["bearing_end"]
+    return result
 
 def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
     """全道路成分を対象に、順序付きの巡回ステップ列を生成する。
@@ -187,14 +328,24 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
     if not steps or first_start is None:
         raise ValueError("巡回ルートを生成できませんでした")
 
-    # 互換用の一本線。transferも含むため、UIでは route_step を優先表示する。
-    coords = [steps[0]["from"]] + [s["to"] for s in steps]
+    # 実際のOSM道路形状を順番どおり連結した一本の巡回線を作る。
+    coords = []
+    for s in steps:
+        c = list(s["geometry"].coords)
+        if not coords:
+            coords.extend(c)
+        elif coords[-1] == c[0]:
+            coords.extend(c[1:])
+        else:
+            coords.extend(c)
     route = LineString(coords)
     route_length = sum(s["length_m"] for s in steps)
     covered_steps = [s for s in steps if not s["transfer"]]
+    navigation_legs = build_navigation_legs(steps)
     return {
         "geometry": route,
         "route_steps": steps,
+        "navigation_legs": navigation_legs,
         "start_point": Point(first_start),
         "requested_start": Point(start_point) if start_point else None,
         "source_edges": source_graph.number_of_edges(),

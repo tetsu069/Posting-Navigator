@@ -50,3 +50,17 @@ def test_route_keeps_disconnected_components_and_ordered_steps():
     assert any(step["transfer"] for step in route["route_steps"])
     assert {step["osm_id"] for step in route["route_steps"] if not step["transfer"]} == {1,2}
     assert [s["seq"] for s in route["route_steps"]] == list(range(1, len(route["route_steps"])+1))
+
+
+def test_navigation_legs_follow_road_geometry():
+    from shapely.geometry import LineString
+    roads = [
+        {"id": 1, "highway": "residential", "name": "曲がる道", "geometry": LineString([(139.0,35.0),(139.0005,35.0002),(139.001,35.0002)])},
+        {"id": 2, "highway": "residential", "name": "縦道", "geometry": LineString([(139.001,35.0002),(139.001,35.001)])},
+    ]
+    route = generate_route(roads, start_point=(139.0,35.0))
+    assert route["navigation_legs"]
+    assert all("instruction" in leg for leg in route["navigation_legs"])
+    # route geometry should preserve intermediate OSM shape coordinates, not just graph-node chords.
+    coords = list(route["geometry"].coords)
+    assert any(abs(x-139.0005)<1e-6 and abs(y-35.0002)<1e-6 for x,y in coords)

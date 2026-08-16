@@ -116,13 +116,13 @@ def public_file(filename: str):
 
 @app.get("/api/health")
 def api_health():
-    return jsonify(status="ok", service="posting-navigator-api", version="1.0.3")
+    return jsonify(status="ok", service="posting-navigator-api", version="1.0.4")
 
 
 @app.get("/api/config")
 def api_config():
     return jsonify(
-        version="1.0.3",
+        version="1.0.4",
         google_client_id=os.getenv("GOOGLE_CLIENT_ID", ""),
         gps_threshold_m=float(os.getenv("GPS_THRESHOLD_M", "18")),
         sync_interval_ms=int(os.getenv("SYNC_INTERVAL_MS", "5000")),
