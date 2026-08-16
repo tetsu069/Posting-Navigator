@@ -4,6 +4,7 @@ import math
 import networkx as nx
 from shapely.geometry import LineString, Point
 from shapely.ops import unary_union
+from shapely.strtree import STRtree
 
 # 幹線道路は対象には残すが、奇数頂点解消のための余分な往復では強い罰則を付ける。
 HIGHWAY_PENALTY = {
@@ -28,7 +29,7 @@ HIGHWAY_PENALTY = {
 def _dist_m(a: tuple[float, float], b: tuple[float, float]) -> float:
     """Fast local distance in metres for town-scale routing.
 
-    v1.0.15 deliberately avoids pyproj.Geod.inv() here.  This helper is called
+    v1.0.16 deliberately avoids pyproj.Geod.inv() here.  This helper is called
     tens of thousands of times while ordering disconnected road components and
     while building navigation legs.  For distances of a few kilometres the
     equirectangular approximation is far more than accurate enough for routing
@@ -69,9 +70,59 @@ def _snap(p: tuple[float, float], precision: int = 6) -> tuple[float, float]:
     return (round(p[0], precision), round(p[1], precision))
 
 
-def _source_for_segment(segment: LineString, roads: list[dict]) -> dict:
-    midpoint = segment.interpolate(0.5, normalized=True)
-    return min(roads, key=lambda road: road["geometry"].distance(midpoint))
+class _RoadSourceIndex:
+    """Spatial index used while reconstructing graph edges after noding.
+
+    v1.0.16 searched *every* road with geometry.distance(midpoint) for every
+    tiny segment emitted by unary_union().  Dense blocks can create thousands
+    of segments, so that O(segments x roads) scan becomes both CPU- and
+    allocation-heavy.  STRtree.query_nearest() returns the nearest geometry
+    index directly in Shapely 2.x, reducing each lookup to a spatial-index
+    query.
+    """
+
+    def __init__(self, roads: list[dict]):
+        if not roads:
+            raise ValueError("道路データが空です")
+        self.roads = roads
+        self.geometries = [r["geometry"] for r in roads]
+        self.tree = STRtree(self.geometries)
+
+    def source_for_segment(self, segment: LineString) -> dict:
+        midpoint = segment.interpolate(0.5, normalized=True)
+        idx = self.tree.query_nearest(midpoint)
+        # Shapely 2.x commonly returns a one-element ndarray for scalar input.
+        # Pull the scalar out explicitly so NumPy does not allocate/warn on an
+        # implicit array-to-scalar conversion.
+        if hasattr(idx, "shape") and getattr(idx, "size", 0):
+            index = int(idx.flat[0])
+        elif hasattr(idx, "__len__"):
+            if not len(idx):
+                raise ValueError("道路空間インデックスから最近傍道路を取得できませんでした")
+            index = int(idx[0])
+        else:
+            index = int(idx)
+        return self.roads[index]
+
+
+def _dedupe_roads_by_geometry(roads: list[dict]) -> list[dict]:
+    """Remove exact duplicate road geometries before expensive noding.
+
+    Worker-area target roads are sometimes also present in connector_roads.
+    Feeding both copies into unary_union/STRtree wastes memory while adding no
+    connectivity.  Keep one copy per geometry WKB and prefer posting_target
+    metadata when duplicate records differ.
+    """
+    by_wkb: dict[bytes, dict] = {}
+    for road in roads:
+        geom = road.get("geometry")
+        if geom is None or geom.is_empty:
+            continue
+        key = bytes(geom.wkb)
+        prev = by_wkb.get(key)
+        if prev is None or (not prev.get("posting_target", True) and road.get("posting_target", True)):
+            by_wkb[key] = road
+    return list(by_wkb.values())
 
 
 def _orient_coords(coords, start, end):
@@ -136,7 +187,9 @@ def build_graph(roads: list[dict], *, simplify: bool = True) -> nx.MultiGraph:
     """道路を実交差点でnode化し、全連結成分を保持したMultiGraphへ変換する。"""
     if not roads:
         raise ValueError("道路データが空です")
+    roads = _dedupe_roads_by_geometry(roads)
     graph = nx.MultiGraph()
+    source_index = _RoadSourceIndex(roads)
     merged = unary_union([road["geometry"] for road in roads])
     lines = [merged] if merged.geom_type == "LineString" else [g for g in getattr(merged, "geoms", []) if g.geom_type == "LineString"]
     for line in lines:
@@ -146,7 +199,7 @@ def build_graph(roads: list[dict], *, simplify: bool = True) -> nx.MultiGraph:
             if u == v:
                 continue
             segment = LineString([u, v])
-            source = _source_for_segment(segment, roads)
+            source = source_index.source_for_segment(segment)
             length = _dist_m(u, v)
             if length < 0.25:
                 continue
@@ -216,7 +269,7 @@ def _component_order(graph: nx.MultiGraph, start_point: tuple[float, float] | No
 
     v1.0.14 repeatedly evaluated every node of every remaining component with
     pyproj.Geod.inv().  On dense Tokyo blocks this became the dominant hot path
-    and could terminate the Render Free worker.  v1.0.15 caches each component
+    and could terminate the Render Free worker.  v1.0.16 caches each component
     bbox and only performs node-level nearest checks for the few components whose
     bboxes are already closest to the current position.
     """
@@ -459,7 +512,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
 
     # 担当エリアで道路をクリップすると、分割境界でグラフが分断されることがある。
     # 町丁目全体の道路＋担当道路を一緒にnode化することで、クリップ端点もconnector graphのnodeになる。
-    connector_source = list(connector_roads or roads) + list(target_roads)
+    connector_source = _dedupe_roads_by_geometry(list(connector_roads or roads) + list(target_roads))
     connector_graph = build_graph(connector_source, simplify=False)
 
     steps: list[dict] = []

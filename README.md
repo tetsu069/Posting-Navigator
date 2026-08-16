@@ -1,11 +1,12 @@
-# Posting Navigator v1.0.8
+# Posting Navigator v1.0.16
 
-## v1.0.8 修正
-- PCでは地図を固定し、左サイドカラムだけ縦スクロール
-- highway=* を広く保持し、明示的 access=no 以外の細街路・歩道・service/path を巡回候補に維持
-- 1〜数mの交差点ノイズをナビ案内から統合
-- 右左折判定を交差点直近の1m線分ではなく道路に沿った約10mの接線方位で判定
-- v1.0.8 キャッシュ更新
+## v1.0.16 修正
+- Renderログで特定した `routing.py::_source_for_segment()` の全道路総当たりを廃止
+- Shapely `STRtree.query_nearest()` で各noded segmentの元道路を最近傍検索
+- connector道路と担当道路の完全重複GeometryをWKB単位で除去し、`unary_union` とSTRtreeへの二重投入を抑制
+- connector graph構築でも同じ空間索引を利用し、`全セグメント × 全道路 × distance()` を発生させない
+- 160本の密集道路を含む回帰テストを追加
+- Render Free 512MBを前提に、前版のcomponent-order軽量化・住宅文脈STRtree化を維持
 
 # Posting Navigator v1.0.3
 
@@ -186,14 +187,6 @@ posting-navigator build \
 - 地図/KMLの「対象道路」には配布対象道路だけを表示。
 
 
-
-## v1.0.15 Render Free向けルーティング高速化
-
-- `_component_order()` の「残り全成分 × 全ノード」の総当たり距離計算を廃止。
-- 各連結成分の bounding box を一度だけ計算し、現在地点から近い候補4成分だけを詳細比較します。
-- 町丁目スケールの距離判定では `pyproj.Geod.inv()` を大量呼び出しせず、軽量な局所平面距離を使用します。
-- これにより、道路成分が細かく分かれるエリアや複数担当者生成時のCPU/メモリ負荷を抑え、Render Freeのworker終了を防ぎます。
-- 距離の高精度測地計算が必要な外部表示ではなく、成分順序・スナップ・連続性など数km以内の内部判定にのみ軽量距離を使います。
 
 ## v1.0.14 Render Free向けメモリ最適化
 
