@@ -31,6 +31,8 @@ def overpass_query(poly: Polygon) -> str:
     return f'''[out:json][timeout:60];
 (
   way["highway"]({bbox});
+  way["leisure"~"^(park|garden|playground)$"]({bbox});
+  way["landuse"="recreation_ground"]({bbox});
 );
 out tags geom;'''
 
@@ -40,7 +42,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.0.9 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.1.0 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -220,65 +222,65 @@ def _is_boundary_parallel(chunk: LineString, boundary_line, max_dist_m: float) -
 
 
 def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
-    """Overpass道路を町丁目内の巡回可能な形状へ切り出す。
+    """OSM道路を町丁目内に限定し、配布価値の低い公園内通路を除外する。
 
-    v1.0.9:
-    - 境界道路を『探す』8m帯と、実際に『歩いてよい』1.5m帯を分離。
-    - 通常道路は町丁目＋1.5mでクリップ。
-    - 1.5〜8mの外側帯は境界と平行な道路だけ例外採用。
-    - 境界から外向きに伸びる交差点枝は巡回グラフへ入れない。
+    single-route版:
+    - 巡回対象は町丁目ポリゴン内（境界誤差0.5mだけ許容）に限定。
+    - 境界から外へ伸びる道路・外側の近接道路は採用しない。
+    - park/garden/playground/recreation_ground 内を主に通る footway/path/pedestrian/steps/service は除外。
+      公園沿いの一般道路や、公園を横切る通常の生活道路は残す。
     """
     roads: list[dict] = []
-    candidate_buffer_m = float(os.getenv("BOUNDARY_ROAD_BUFFER_M", "8"))
-    walk_tolerance_m = float(os.getenv("BOUNDARY_WALK_TOLERANCE_M", "1.5"))
-    candidate_buffer_m = max(walk_tolerance_m, candidate_buffer_m)
-    walk_tolerance_m = max(0.0, walk_tolerance_m)
-
     fwd, inv = _metric_transformers(boundary)
     boundary_m = transform(fwd, boundary)
-    boundary_line_m = boundary_m.boundary
-    candidate_region = boundary_m.buffer(candidate_buffer_m)
-    safe_region = boundary_m.buffer(walk_tolerance_m)
+    safe_region = boundary_m.buffer(0.5)
 
+    park_polys = []
+    for element in data.get("elements", []):
+        if element.get("type") != "way" or "geometry" not in element:
+            continue
+        tags = element.get("tags", {})
+        is_park = tags.get("leisure") in {"park", "garden", "playground"} or tags.get("landuse") == "recreation_ground"
+        if not is_park:
+            continue
+        coords = [(pt["lon"], pt["lat"]) for pt in element["geometry"]]
+        if len(coords) >= 4 and coords[0] == coords[-1]:
+            try:
+                poly = Polygon(coords)
+                if poly.is_valid and not poly.is_empty:
+                    park_polys.append(transform(fwd, poly))
+            except Exception:
+                pass
+    parks_m = unary_union(park_polys) if park_polys else None
+
+    park_walk_highways = {"footway", "path", "pedestrian", "steps", "service"}
     for element in data.get("elements", []):
         if element.get("type") != "way" or "geometry" not in element:
             continue
         tags = element.get("tags", {})
         highway = tags.get("highway", "")
-        if highway in EXCLUDED_HIGHWAYS:
+        if not highway or highway in EXCLUDED_HIGHWAYS:
             continue
         access = tags.get("access", "")
-        if access in {"no"} and highway not in {"pedestrian", "footway"}:
+        if access == "no" and highway not in {"pedestrian", "footway"}:
             continue
         coords = [(pt["lon"], pt["lat"]) for pt in element["geometry"]]
         if len(coords) < 2:
             continue
-
         line_m = transform(fwd, LineString(coords))
-        candidate = line_m.intersection(candidate_region)
-        accepted: list[LineString] = []
-        for cand in _as_lines(candidate):
-            inside = cand.intersection(safe_region)
-            accepted.extend(g for g in _as_lines(inside) if g.length >= 0.5)
-
-            fringe = cand.difference(safe_region)
-            accepted.extend(
-                g for g in _as_lines(fringe)
-                if g.length >= 0.5 and _is_boundary_parallel(g, boundary_line_m, candidate_buffer_m)
-            )
-
-        if not accepted:
-            continue
-        united = unary_union(accepted)
-        merged = united if united.geom_type == "LineString" else linemerge(united)
-        for geom_m in _as_lines(merged):
+        clipped = line_m.intersection(safe_region)
+        for geom_m in _as_lines(clipped):
             if geom_m.length < 0.5:
                 continue
+            if parks_m is not None and highway in park_walk_highways:
+                in_park = geom_m.intersection(parks_m).length
+                if in_park / max(geom_m.length, 0.001) >= 0.50:
+                    continue
             geom = transform(inv, geom_m)
             roads.append({
                 "id": element.get("id"), "highway": highway, "name": tags.get("name", ""),
-                "access": tags.get("access", ""), "service": tags.get("service", ""),
-                "foot": tags.get("foot", ""), "boundary_near": not geom.within(boundary),
+                "access": access, "service": tags.get("service", ""),
+                "foot": tags.get("foot", ""), "boundary_near": False,
                 "geometry": geom,
             })
     return roads

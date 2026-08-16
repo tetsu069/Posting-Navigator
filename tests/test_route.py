@@ -37,7 +37,7 @@ def test_split_route_balances_distance_and_preserves_continuity():
         assert previous["end_point"].distance(current["start_point"]) < 1e-12
 
 
-def test_route_keeps_disconnected_components_and_ordered_steps():
+def test_route_never_draws_fake_transfer_between_disconnected_components():
     from shapely.geometry import LineString
     from posting_navigator.routing import generate_route
     roads = [
@@ -47,9 +47,9 @@ def test_route_keeps_disconnected_components_and_ordered_steps():
     route = generate_route(roads, start_point=(139.0,35.0))
     assert route["component_count"] == 2
     assert route["source_edges"] == 2
-    assert any(step["transfer"] for step in route["route_steps"])
-    assert {step["osm_id"] for step in route["route_steps"] if not step["transfer"]} == {1,2}
-    assert [s["seq"] for s in route["route_steps"]] == list(range(1, len(route["route_steps"])+1))
+    assert not any(step["transfer"] for step in route["route_steps"])
+    assert route["skipped_disconnected_length_m"] > 0
+    assert {step["osm_id"] for step in route["route_steps"] if not step["transfer"]} == {1}
 
 
 def test_navigation_legs_follow_road_geometry():
