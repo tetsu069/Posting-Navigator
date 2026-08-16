@@ -16,7 +16,7 @@ from flask import Flask, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-from .kmz import list_areas_from_kmz, list_area_geojson_from_kmz
+from .kmz import list_areas_from_kmz, list_area_geojson_from_kmz, list_area_info_from_kmz
 from .service import run_build
 
 BASE = Path.cwd()
@@ -116,13 +116,13 @@ def public_file(filename: str):
 
 @app.get("/api/health")
 def api_health():
-    return jsonify(status="ok", service="posting-navigator-api", version="1.0.7")
+    return jsonify(status="ok", service="posting-navigator-api", version="1.0.8")
 
 
 @app.get("/api/config")
 def api_config():
     return jsonify(
-        version="1.0.7",
+        version="1.0.8",
         google_client_id=os.getenv("GOOGLE_CLIENT_ID", ""),
         gps_threshold_m=float(os.getenv("GPS_THRESHOLD_M", "18")),
         sync_interval_ms=int(os.getenv("SYNC_INTERVAL_MS", "5000")),
@@ -186,10 +186,11 @@ def api_areas():
     try:
         areas = list_areas_from_kmz(path)
         area_geojson = list_area_geojson_from_kmz(path)
+        area_info = list_area_info_from_kmz(path)
     except Exception as exc:
         path.unlink(missing_ok=True)
         return jsonify(error=f"KMZを解析できません: {exc}"), 400
-    return jsonify(upload_id=upload_id, areas=areas, area_geojson=area_geojson)
+    return jsonify(upload_id=upload_id, areas=areas, area_geojson=area_geojson, area_info=area_info)
 
 
 @app.post("/api/build")

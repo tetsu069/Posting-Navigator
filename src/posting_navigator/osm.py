@@ -37,7 +37,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.0.7 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.0.8 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -161,6 +161,11 @@ def fetch_osm_roads(poly: Polygon, cache_path: str | Path | None = None, timeout
 
 def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
     roads: list[dict] = []
+    # 町丁目境界は道路中心線に沿って引かれていることが多い。厳密 intersection だけだと
+    # 数十cm〜数mの座標差で境界道路が丸ごと落ちるため、境界近傍を巡回対象へ含める。
+    buffer_m = float(os.getenv("BOUNDARY_ROAD_BUFFER_M", "8"))
+    buffer_deg = max(0.0, buffer_m) / 111_320.0
+    clip_boundary = boundary.buffer(buffer_deg) if buffer_deg else boundary
     for element in data.get("elements", []):
         if element.get("type") != "way" or "geometry" not in element:
             continue
@@ -176,13 +181,14 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
         coords = [(p["lon"], p["lat"]) for p in element["geometry"]]
         if len(coords) < 2:
             continue
-        clipped = LineString(coords).intersection(boundary)
+        line = LineString(coords)
+        clipped = line.intersection(clip_boundary)
         geoms = [clipped] if clipped.geom_type == "LineString" else list(getattr(clipped, "geoms", []))
         for geom in geoms:
             if geom.geom_type == "LineString" and len(geom.coords) >= 2 and geom.length > 1e-7:
                 roads.append({
                     "id": element.get("id"), "highway": highway, "name": tags.get("name", ""),
                     "access": tags.get("access", ""), "service": tags.get("service", ""),
-                    "foot": tags.get("foot", ""), "geometry": geom
+                    "foot": tags.get("foot", ""), "boundary_near": not geom.within(boundary), "geometry": geom
                 })
     return roads

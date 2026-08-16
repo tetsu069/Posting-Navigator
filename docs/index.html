@@ -14,7 +14,7 @@
 <div class="app-shell">
   <header class="topbar">
     <div><h1>Posting Navigator</h1><p>ルート作成・GPS進捗・チーム共有</p></div>
-    <div class="top-actions"><span class="badge">v1.0.7</span><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
+    <div class="top-actions"><span class="badge">v1.0.8</span><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
   </header>
 
   <main class="layout">
@@ -32,6 +32,7 @@
 
         <label>2. 対象町丁目</label>
         <select id="area" disabled><option>KMZを先に選択</option></select>
+        <div id="householdBox" class="household-box hidden"><span>世帯数</span><b id="householdTotal">—</b><small>KMZ登録値</small></div>
 
         <label>3. 担当人数</label>
         <input id="workers" type="number" value="4" min="1" max="30">
@@ -60,7 +61,7 @@
         <label class="check"><input id="autoFollow" type="checkbox" checked> 現在地を地図中央に追従</label>
         <label>完了判定距離</label>
         <div class="row"><input id="gpsThreshold" type="range" min="8" max="40" value="18"><div class="range-value"><span id="gpsThresholdText">18</span>m</div></div>
-        <div id="nextGuide" class="next-guide hidden"></div><div id="gpsStatus" class="status">ルート生成後、担当を選択してGPSを開始してください。</div>
+        <div id="householdProgress" class="household-progress hidden"><div><span>推定配布済み</span><b id="householdDone">—</b></div><div><span>推定残り</span><b id="householdRemain">—</b></div><small>GPS巡回進捗からの按分推定です</small></div><div id="nextGuide" class="next-guide hidden"></div><div id="gpsStatus" class="status">ルート生成後、担当を選択してGPSを開始してください。</div>
         <div class="legend"><span><i class="dot todo"></i>未配布</span><span><i class="dot done"></i>配布済み</span><span><i class="dot me"></i>現在地</span></div>
         <button id="resetProgress" class="secondary">この担当の進捗をリセット</button>
       </section>
