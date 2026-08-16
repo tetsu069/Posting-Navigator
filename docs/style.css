@@ -41,5 +41,5 @@
   #map{height:100%;min-height:0}
 }
 
-/* v1.0.8 households */
+/* v1.0.9 households */
 .household-box{margin-top:8px;padding:10px 12px;border-radius:12px;background:#f8fafc;border:1px solid #dbe4ee;display:grid;grid-template-columns:1fr auto;gap:2px 10px;align-items:end}.household-box span,.household-progress span{font-size:12px;color:#64748b}.household-box b{font-size:22px;color:#0f172a}.household-box small{grid-column:1/-1;color:#94a3b8}.household-progress{margin-top:10px;padding:10px;border-radius:12px;background:#f8fafc;border:1px solid #dbeafe;display:grid;grid-template-columns:1fr 1fr;gap:8px}.household-progress>div{padding:8px;background:white;border-radius:9px}.household-progress b{display:block;font-size:20px;margin-top:3px}.household-progress small{grid-column:1/-1;color:#64748b;font-size:11px}.household-progress.hidden,.household-box.hidden{display:none!important}

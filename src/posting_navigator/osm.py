@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from pathlib import Path
 
 import requests
 from shapely.geometry import LineString, Polygon
+from shapely.ops import linemerge, transform, unary_union
+from pyproj import CRS, Transformer
 
 # OpenStreetMap Wiki の Public Overpass API instances (2026-08 確認) を基準にする。
 # kumi.systems は private.coffee へ移行済み。
@@ -37,7 +40,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.0.8 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.0.9 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -159,13 +162,84 @@ def fetch_osm_roads(poly: Polygon, cache_path: str | Path | None = None, timeout
     )
 
 
+def _metric_transformers(boundary: Polygon):
+    """町丁目の重心を中心にした局所AEQD座標系を作る。距離判定をメートルで行うため。"""
+    c = boundary.centroid
+    crs_geo = CRS.from_epsg(4326)
+    crs_local = CRS.from_proj4(
+        f"+proj=aeqd +lat_0={c.y:.10f} +lon_0={c.x:.10f} +datum=WGS84 +units=m +no_defs"
+    )
+    fwd_t = Transformer.from_crs(crs_geo, crs_local, always_xy=True)
+    inv_t = Transformer.from_crs(crs_local, crs_geo, always_xy=True)
+    return fwd_t.transform, inv_t.transform
+
+
+def _as_lines(geom) -> list[LineString]:
+    if geom.is_empty:
+        return []
+    if geom.geom_type == "LineString":
+        return [geom]
+    return [g for g in getattr(geom, "geoms", []) if g.geom_type == "LineString" and not g.is_empty]
+
+
+def _angle_diff_deg(a: float, b: float) -> float:
+    d = abs((a - b) % 180.0)
+    return min(d, 180.0 - d)
+
+
+def _line_angle(line: LineString) -> float:
+    coords = list(line.coords)
+    if len(coords) < 2:
+        return 0.0
+    a, b = coords[0], coords[-1]
+    return math.degrees(math.atan2(b[1] - a[1], b[0] - a[0])) % 180.0
+
+
+def _boundary_tangent_angle(boundary_line, point, sample_m: float = 5.0) -> float:
+    d = boundary_line.project(point)
+    length = boundary_line.length
+    a = boundary_line.interpolate(max(0.0, d - sample_m))
+    b = boundary_line.interpolate(min(length, d + sample_m))
+    return math.degrees(math.atan2(b.y - a.y, b.x - a.x)) % 180.0
+
+
+def _is_boundary_parallel(chunk: LineString, boundary_line, max_dist_m: float) -> bool:
+    """境界外の許容帯にある道路が『境界に沿う道路』か判定する。"""
+    if chunk.length < 1.0:
+        return False
+    pts = [chunk.interpolate(frac, normalized=True) for frac in (0.0, 0.25, 0.5, 0.75, 1.0)]
+    distances = [boundary_line.distance(pt) for pt in pts]
+    if max(distances) > max_dist_m + 0.25:
+        return False
+    # 外向き枝道は境界からの距離が急増する。平行道路はほぼ一定。
+    if max(distances) - min(distances) > 2.75:
+        return False
+    road_angle = _line_angle(chunk)
+    tangent_angle = _boundary_tangent_angle(boundary_line, pts[2])
+    return _angle_diff_deg(road_angle, tangent_angle) <= 32.0
+
+
 def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
+    """Overpass道路を町丁目内の巡回可能な形状へ切り出す。
+
+    v1.0.9:
+    - 境界道路を『探す』8m帯と、実際に『歩いてよい』1.5m帯を分離。
+    - 通常道路は町丁目＋1.5mでクリップ。
+    - 1.5〜8mの外側帯は境界と平行な道路だけ例外採用。
+    - 境界から外向きに伸びる交差点枝は巡回グラフへ入れない。
+    """
     roads: list[dict] = []
-    # 町丁目境界は道路中心線に沿って引かれていることが多い。厳密 intersection だけだと
-    # 数十cm〜数mの座標差で境界道路が丸ごと落ちるため、境界近傍を巡回対象へ含める。
-    buffer_m = float(os.getenv("BOUNDARY_ROAD_BUFFER_M", "8"))
-    buffer_deg = max(0.0, buffer_m) / 111_320.0
-    clip_boundary = boundary.buffer(buffer_deg) if buffer_deg else boundary
+    candidate_buffer_m = float(os.getenv("BOUNDARY_ROAD_BUFFER_M", "8"))
+    walk_tolerance_m = float(os.getenv("BOUNDARY_WALK_TOLERANCE_M", "1.5"))
+    candidate_buffer_m = max(walk_tolerance_m, candidate_buffer_m)
+    walk_tolerance_m = max(0.0, walk_tolerance_m)
+
+    fwd, inv = _metric_transformers(boundary)
+    boundary_m = transform(fwd, boundary)
+    boundary_line_m = boundary_m.boundary
+    candidate_region = boundary_m.buffer(candidate_buffer_m)
+    safe_region = boundary_m.buffer(walk_tolerance_m)
+
     for element in data.get("elements", []):
         if element.get("type") != "way" or "geometry" not in element:
             continue
@@ -173,22 +247,38 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
         highway = tags.get("highway", "")
         if highway in EXCLUDED_HIGHWAYS:
             continue
-        # highway=* は細街路・歩道・service/path も含めて広く取得する。
-        # 明示的に通行不能なものだけ除外し、private は診断可能な属性として残す。
         access = tags.get("access", "")
         if access in {"no"} and highway not in {"pedestrian", "footway"}:
             continue
-        coords = [(p["lon"], p["lat"]) for p in element["geometry"]]
+        coords = [(pt["lon"], pt["lat"]) for pt in element["geometry"]]
         if len(coords) < 2:
             continue
-        line = LineString(coords)
-        clipped = line.intersection(clip_boundary)
-        geoms = [clipped] if clipped.geom_type == "LineString" else list(getattr(clipped, "geoms", []))
-        for geom in geoms:
-            if geom.geom_type == "LineString" and len(geom.coords) >= 2 and geom.length > 1e-7:
-                roads.append({
-                    "id": element.get("id"), "highway": highway, "name": tags.get("name", ""),
-                    "access": tags.get("access", ""), "service": tags.get("service", ""),
-                    "foot": tags.get("foot", ""), "boundary_near": not geom.within(boundary), "geometry": geom
-                })
+
+        line_m = transform(fwd, LineString(coords))
+        candidate = line_m.intersection(candidate_region)
+        accepted: list[LineString] = []
+        for cand in _as_lines(candidate):
+            inside = cand.intersection(safe_region)
+            accepted.extend(g for g in _as_lines(inside) if g.length >= 0.5)
+
+            fringe = cand.difference(safe_region)
+            accepted.extend(
+                g for g in _as_lines(fringe)
+                if g.length >= 0.5 and _is_boundary_parallel(g, boundary_line_m, candidate_buffer_m)
+            )
+
+        if not accepted:
+            continue
+        united = unary_union(accepted)
+        merged = united if united.geom_type == "LineString" else linemerge(united)
+        for geom_m in _as_lines(merged):
+            if geom_m.length < 0.5:
+                continue
+            geom = transform(inv, geom_m)
+            roads.append({
+                "id": element.get("id"), "highway": highway, "name": tags.get("name", ""),
+                "access": tags.get("access", ""), "service": tags.get("service", ""),
+                "foot": tags.get("foot", ""), "boundary_near": not geom.within(boundary),
+                "geometry": geom,
+            })
     return roads

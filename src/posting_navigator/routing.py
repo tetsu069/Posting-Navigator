@@ -83,6 +83,7 @@ def _simplify_degree_two(graph: nx.MultiGraph) -> nx.MultiGraph:
                 "length": float(d1.get("length", 0)) + float(d2.get("length", 0)),
                 "route_cost": float(d1.get("route_cost", 0)) + float(d2.get("route_cost", 0)),
                 "highway": highway, "name": name, "osm_id": osm_id,
+                "boundary_near": bool(d1.get("boundary_near") or d2.get("boundary_near")),
                 "geometry": LineString(coords),
             }
             g.remove_edge(n, a, k1)
@@ -122,6 +123,7 @@ def build_graph(roads: list[dict]) -> nx.MultiGraph:
                 highway=highway,
                 name=source.get("name", ""),
                 osm_id=source.get("id"),
+                boundary_near=bool(source.get("boundary_near", False)),
                 geometry=segment,
             )
     if graph.number_of_edges() == 0:
@@ -201,6 +203,7 @@ def _step(u, v, data: dict, seq: int, *, transfer: bool = False, component: int 
         "highway": data.get("highway", "") if data else "",
         "name": data.get("name", "") if data else "",
         "osm_id": data.get("osm_id") if data else None,
+        "boundary_near": bool(data.get("boundary_near")) if data else False,
         "duplicated": bool(data.get("duplicated")) if data else False,
         "transfer": transfer,
         "component": component,
