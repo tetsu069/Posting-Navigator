@@ -26,6 +26,8 @@ def write_kml(area_name: str, boundary: Polygon, roads: list[dict], route: dict,
     output_path.parent.mkdir(parents=True, exist_ok=True)
     road_placemarks = []
     for road in roads:
+        if not road.get("posting_target", True):
+            continue
         road_placemarks.append(f'''<Placemark><name>{html.escape(road.get("name") or road.get("highway") or "道路")}</name>
 <styleUrl>#road</styleUrl><ExtendedData><Data name="highway"><value>{html.escape(road.get("highway", ""))}</value></Data></ExtendedData><LineString><tessellate>1</tessellate><coordinates>{_coords_text(road["geometry"].coords)}</coordinates></LineString></Placemark>''')
     desc = html.escape(json.dumps(_route_properties(route), ensure_ascii=False))
@@ -75,7 +77,7 @@ def write_kmz(kml_path: str | Path, kmz_path: str | Path) -> Path:
 
 def write_geojson(area_name: str, boundary: Polygon, roads: list[dict], route: dict, output_path: str | Path) -> Path:
     features = [{"type": "Feature", "properties": {"kind": "area", "name": area_name}, "geometry": mapping(boundary)}]
-    features += [{"type": "Feature", "properties": {"kind": "road", "highway": r.get("highway"), "name": r.get("name")}, "geometry": mapping(r["geometry"])} for r in roads]
+    features += [{"type": "Feature", "properties": {"kind": "road", "highway": r.get("highway"), "name": r.get("name"), "residential_score": r.get("residential_score"), "nearest_building_m": r.get("nearest_building_m")}, "geometry": mapping(r["geometry"])} for r in roads if r.get("posting_target", True)]
     features.append({"type": "Feature", "properties": {"kind": "route", **_route_properties(route)}, "geometry": mapping(route["geometry"])})
     for step in route.get("route_steps", []):
         props = {k: v for k, v in step.items() if k not in {"geometry", "from", "to"}}

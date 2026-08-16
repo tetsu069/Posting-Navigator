@@ -84,6 +84,9 @@ def _simplify_degree_two(graph: nx.MultiGraph) -> nx.MultiGraph:
                 "route_cost": float(d1.get("route_cost", 0)) + float(d2.get("route_cost", 0)),
                 "highway": highway, "name": name, "osm_id": osm_id,
                 "boundary_near": bool(d1.get("boundary_near") or d2.get("boundary_near")),
+                "posting_target": bool(d1.get("posting_target", True) and d2.get("posting_target", True)),
+                "residential_score": max(float(d1.get("residential_score", 0.5)), float(d2.get("residential_score", 0.5))),
+                "nonresidential_overlap": max(float(d1.get("nonresidential_overlap", 0.0)), float(d2.get("nonresidential_overlap", 0.0))),
                 "geometry": LineString(coords),
             }
             g.remove_edge(n, a, k1)
@@ -96,7 +99,7 @@ def _simplify_degree_two(graph: nx.MultiGraph) -> nx.MultiGraph:
     return g
 
 
-def build_graph(roads: list[dict]) -> nx.MultiGraph:
+def build_graph(roads: list[dict], *, simplify: bool = True) -> nx.MultiGraph:
     """道路を実交差点でnode化し、全連結成分を保持したMultiGraphへ変換する。"""
     if not roads:
         raise ValueError("道路データが空です")
@@ -116,19 +119,31 @@ def build_graph(roads: list[dict]) -> nx.MultiGraph:
                 continue
             highway = source.get("highway", "")
             penalty = HIGHWAY_PENALTY.get(highway, 1.5)
+            residential_score = float(source.get("residential_score", 0.5))
+            nonres_overlap = float(source.get("nonresidential_overlap", 0.0))
+            posting_target = bool(source.get("posting_target", True))
+            # 余分な往復/成分間移動では住宅沿いを優先し、公園等connector-only道路を強く避ける。
+            density_factor = 1.30 - 0.50 * max(0.0, min(1.0, residential_score))
+            if nonres_overlap >= 0.45:
+                density_factor *= 2.5
+            if not posting_target:
+                density_factor *= 4.0
             graph.add_edge(
                 u, v,
                 length=length,
-                route_cost=length * penalty,
+                route_cost=length * penalty * density_factor,
                 highway=highway,
                 name=source.get("name", ""),
                 osm_id=source.get("id"),
                 boundary_near=bool(source.get("boundary_near", False)),
+                posting_target=posting_target,
+                residential_score=residential_score,
+                nonresidential_overlap=nonres_overlap,
                 geometry=segment,
             )
     if graph.number_of_edges() == 0:
         raise ValueError("道路グラフが空です")
-    return _simplify_degree_two(graph)
+    return _simplify_degree_two(graph) if simplify else graph
 
 def _nearest_node(g: nx.MultiGraph, point: tuple[float, float] | None) -> tuple[float, float]:
     if point is None:
@@ -193,7 +208,9 @@ def _oriented_edge_geometry(u, v, data: dict) -> LineString:
 
 
 def _step(u, v, data: dict, seq: int, *, transfer: bool = False, component: int = 1) -> dict:
-    geom = LineString([u, v]) if transfer else _oriented_edge_geometry(u, v, data)
+    # v1.0.11: transfer も必ず実道路 geometry を使う。data が無い場合だけ
+    # 旧互換として直線になるが、本番の generate_route からは data 無し transfer を作らない。
+    geom = _oriented_edge_geometry(u, v, data) if data else LineString([u, v])
     return {
         "seq": seq,
         "geometry": geom,
@@ -204,6 +221,8 @@ def _step(u, v, data: dict, seq: int, *, transfer: bool = False, component: int 
         "name": data.get("name", "") if data else "",
         "osm_id": data.get("osm_id") if data else None,
         "boundary_near": bool(data.get("boundary_near")) if data else False,
+        "posting_target": bool(data.get("posting_target", True)) if data else True,
+        "residential_score": float(data.get("residential_score", 0.5)) if data else 0.5,
         "duplicated": bool(data.get("duplicated")) if data else False,
         "transfer": transfer,
         "component": component,
@@ -340,15 +359,53 @@ def build_navigation_legs(steps: list[dict]) -> list[dict]:
         prev = leg["bearing_end"]
     return result
 
-def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
-    """全道路成分を対象に、順序付きの巡回ステップ列を生成する。
+def _connector_path_steps(connector_graph: nx.MultiGraph, start, goal, *, seq_start: int, component: int) -> list[dict]:
+    """2つの巡回成分を、実在する道路エッジだけで接続する。
 
-    小さな非連結成分も捨てない。成分間は transfer ステップとして明示し、
-    配布対象道路と区別できるようにする。
+    直線ショートカットは一切作らない。接続できない場合は生成を失敗させる。
     """
-    source_graph = build_graph(roads)
+    if start == goal:
+        return []
+    if start not in connector_graph or goal not in connector_graph:
+        raise ValueError("巡回区間を実道路上で接続できません（接続ノードが道路網にありません）")
+    try:
+        path = nx.shortest_path(connector_graph, start, goal, weight="route_cost")
+    except (nx.NetworkXNoPath, nx.NodeNotFound) as exc:
+        raise ValueError("巡回区間同士を実道路上で接続できません。道路データの接続状態を確認してください") from exc
+    out: list[dict] = []
+    seq = seq_start
+    for a, b in zip(path, path[1:]):
+        candidates = connector_graph.get_edge_data(a, b)
+        if not candidates:
+            raise ValueError("道路接続経路の復元に失敗しました")
+        data = dict(min(candidates.values(), key=lambda d: d.get("route_cost", math.inf)))
+        # transfer は配布対象ではない移動区間だが、形状は必ずOSM道路そのもの。
+        data["duplicated"] = False
+        out.append(_step(a, b, data, seq, transfer=True, component=component))
+        seq += 1
+    return out
+
+
+def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None,
+                   connector_roads: list[dict] | None = None) -> dict:
+    """全対象道路を巡回する順序付きルートを生成する。
+
+    v1.0.11では非連結な担当道路成分間の移動も、直線ではなく
+    connector_roads（通常は町丁目全体のOSM道路）上の最短経路を使う。
+    実道路で接続できない場合は偽ルートを描かずエラーにする。
+    """
+    target_roads = [r for r in roads if r.get("posting_target", True)]
+    if not target_roads:
+        raise ValueError("住宅・配布対象道路がありません")
+    source_graph = build_graph(target_roads)
     component_sets = _component_order(source_graph, start_point)
     source_length = sum(d["length"] for _, _, d in source_graph.edges(data=True))
+
+    # 担当エリアで道路をクリップすると、分割境界でグラフが分断されることがある。
+    # 町丁目全体の道路＋担当道路を一緒にnode化することで、クリップ端点もconnector graphのnodeになる。
+    connector_source = list(connector_roads or roads) + list(target_roads)
+    connector_graph = build_graph(connector_source, simplify=False)
+
     steps: list[dict] = []
     duplicated_length = 0.0
     major_duplicated = 0.0
@@ -363,39 +420,46 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         comp_start = _nearest_node(comp, current_point)
         if first_start is None:
             first_start = comp_start
-        if current_point is not None and steps:
+        if steps:
             prev = steps[-1]["to"]
             if prev != comp_start:
-                s = _step(prev, comp_start, {}, len(steps) + 1, transfer=True, component=component_index)
-                steps.append(s)
-                transfer_length += s["length_m"]
+                transfer_steps = _connector_path_steps(
+                    connector_graph, prev, comp_start, seq_start=len(steps) + 1, component=component_index
+                )
+                steps.extend(transfer_steps)
+                transfer_length += sum(float(x["length_m"]) for x in transfer_steps)
         circuit = list(nx.eulerian_circuit(comp, source=comp_start, keys=True))
         for u, v, k in circuit:
             data = comp[u][v][k]
-            s = _step(u, v, data, len(steps) + 1, component=component_index)
-            steps.append(s)
-            if s["duplicated"]:
-                duplicated_length += s["length_m"]
-                if s["highway"] in {"primary", "primary_link", "secondary", "secondary_link"}:
-                    major_duplicated += s["length_m"]
+            st = _step(u, v, data, len(steps) + 1, component=component_index)
+            steps.append(st)
+            if st["duplicated"]:
+                duplicated_length += st["length_m"]
+                if st["highway"] in {"primary", "primary_link", "secondary", "secondary_link"}:
+                    major_duplicated += st["length_m"]
         current_point = comp_start
 
     if not steps or first_start is None:
         raise ValueError("巡回ルートを生成できませんでした")
 
-    # 実際のOSM道路形状を順番どおり連結した一本の巡回線を作る。
-    coords = []
-    for s in steps:
-        c = list(s["geometry"].coords)
+    # すべての隣接stepが実座標で連続していることを検証する。
+    # ここで不連続ならLineString化してはいけない。
+    for a, b in zip(steps, steps[1:]):
+        if _dist_m(a["to"], b["from"]) > 0.75:
+            raise ValueError("巡回ルートに道路外の不連続区間が検出されました。生成を中止します")
+
+    coords: list[tuple[float, float]] = []
+    for st in steps:
+        c = list(st["geometry"].coords)
         if not coords:
             coords.extend(c)
-        elif coords[-1] == c[0]:
-            coords.extend(c[1:])
         else:
-            coords.extend(c)
+            if _dist_m(coords[-1], c[0]) > 0.75:
+                raise ValueError("道路geometry同士が接続していないため、偽の直線を作らず生成を中止しました")
+            coords.extend(c[1:])
     route = LineString(coords)
-    route_length = sum(s["length_m"] for s in steps)
-    covered_steps = [s for s in steps if not s["transfer"]]
+    route_length = sum(st["length_m"] for st in steps)
+    covered_steps = [st for st in steps if not st["transfer"]]
     navigation_legs = build_navigation_legs(steps)
     return {
         "geometry": route,
@@ -416,6 +480,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "dead_end_count": len(dead_ends),
         "start_lon": first_start[0],
         "start_lat": first_start[1],
+        "road_only_route": True,
     }
 
 
@@ -580,12 +645,13 @@ def generate_worker_routes(boundary, roads: list[dict], workers: int,
                            start_point: tuple[float, float] | None = None,
                            households: int | None = None) -> list[dict]:
     """Generate an independent Chinese-Postman route for each geographic worker area."""
-    parts = partition_worker_areas(boundary, roads, workers)
+    target_roads = [r for r in roads if r.get("posting_target", True)]
+    parts = partition_worker_areas(boundary, target_roads, workers)
     assignments = []
     total_source = 0.0
     generated = []
     for part in parts:
-        wr = generate_route(part["roads"], start_point=start_point)
+        wr = generate_route(part["roads"], start_point=start_point, connector_roads=roads)
         total_source += float(wr.get("source_length_m", 0))
         generated.append((part, wr))
     for part, wr in generated:

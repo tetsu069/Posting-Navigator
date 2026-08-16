@@ -26,11 +26,23 @@ _ENDPOINT_COOLDOWN_UNTIL: dict[str, float] = {}
 
 
 def overpass_query(poly: Polygon) -> str:
+    """道路に加え、住宅密度と非住宅敷地の判定に必要なOSM要素も取得する。
+
+    v1.0.12では「道路だから全部巡回」ではなく、住宅がある道路を配布対象にし、
+    公園・学校・緑地の園路は必要な移動時だけconnectorとして残す。
+    """
     minx, miny, maxx, maxy = poly.bounds
     bbox = f"{miny:.7f},{minx:.7f},{maxy:.7f},{maxx:.7f}"
-    return f'''[out:json][timeout:60];
+    return f'''[out:json][timeout:75];
 (
   way["highway"]({bbox});
+  way["building"]({bbox});
+  way["leisure"~"^(park|garden|playground|pitch|sports_centre)$"]({bbox});
+  relation["leisure"~"^(park|garden|playground|pitch|sports_centre)$"]({bbox});
+  way["landuse"~"^(grass|recreation_ground|forest|cemetery|allotments)$"]({bbox});
+  relation["landuse"~"^(grass|recreation_ground|forest|cemetery|allotments)$"]({bbox});
+  way["amenity"~"^(school|kindergarten|university|college)$"]({bbox});
+  relation["amenity"~"^(school|kindergarten|university|college)$"]({bbox});
 );
 out tags geom;'''
 
@@ -40,7 +52,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.0.10 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.0.12 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -124,9 +136,11 @@ def fetch_osm_roads(poly: Polygon, cache_path: str | Path | None = None, timeout
         if cache_path.exists():
             try:
                 cached = json.loads(cache_path.read_text(encoding="utf-8"))
-                return _validate_overpass_json(cached, "cache")
+                # v1.0.12から建物・公園等のcontext要素が必要。旧道路-onlyキャッシュは使わない。
+                if cached.get("_pn_cache_schema") != 2 or "data" not in cached:
+                    raise ValueError("old cache schema")
+                return _validate_overpass_json(cached["data"], "cache")
             except Exception:
-                # 壊れた/旧形式キャッシュは捨てて取り直す。
                 cache_path.unlink(missing_ok=True)
 
     endpoints_env = os.getenv("OVERPASS_ENDPOINTS", "").strip()
@@ -150,7 +164,7 @@ def fetch_osm_roads(poly: Polygon, cache_path: str | Path | None = None, timeout
             if cache_path:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
-                tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                tmp.write_text(json.dumps({"_pn_cache_schema": 2, "data": data}, ensure_ascii=False), encoding="utf-8")
                 tmp.replace(cache_path)
             return data
         except Exception as exc:  # 次のミラーへフェイルオーバー
@@ -219,11 +233,119 @@ def _is_boundary_parallel(chunk: LineString, boundary_line, max_dist_m: float) -
     return _angle_diff_deg(road_angle, tangent_angle) <= 32.0
 
 
+
+def _polygon_from_coords(coords):
+    if len(coords) < 4 or coords[0] != coords[-1]:
+        return None
+    try:
+        poly = Polygon(coords)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        return poly if not poly.is_empty else None
+    except Exception:
+        return None
+
+
+def _element_polygons(element: dict) -> list[Polygon]:
+    """way / multipolygon relation の外周を簡易Polygon化する。"""
+    if element.get("type") == "way":
+        geom = element.get("geometry") or []
+        coords = [(p["lon"], p["lat"]) for p in geom if "lon" in p and "lat" in p]
+        p = _polygon_from_coords(coords)
+        return [p] if p is not None else []
+    if element.get("type") == "relation":
+        polys = []
+        for member in element.get("members", []):
+            if member.get("role") not in {"", "outer"}:
+                continue
+            geom = member.get("geometry") or []
+            coords = [(p["lon"], p["lat"]) for p in geom if "lon" in p and "lat" in p]
+            p = _polygon_from_coords(coords)
+            if p is not None:
+                polys.append(p)
+        return polys
+    return []
+
+
+def _context_unions(data: dict, fwd):
+    buildings = []
+    nonres = []
+    for element in data.get("elements", []):
+        tags = element.get("tags", {})
+        polys = _element_polygons(element)
+        if not polys:
+            continue
+        if tags.get("building") and tags.get("building") != "no":
+            buildings.extend(transform(fwd, p) for p in polys)
+        is_nonres = (
+            tags.get("leisure") in {"park", "garden", "playground", "pitch", "sports_centre"}
+            or tags.get("landuse") in {"grass", "recreation_ground", "forest", "cemetery", "allotments"}
+            or tags.get("amenity") in {"school", "kindergarten", "university", "college"}
+        )
+        if is_nonres:
+            nonres.extend(transform(fwd, p) for p in polys)
+    return (
+        unary_union(buildings) if buildings else None,
+        unary_union(nonres) if nonres else None,
+    )
+
+
+def _road_context_score(geom_m: LineString, highway: str, service: str, building_union, nonres_union) -> tuple[bool, float, float, float]:
+    """(posting_target, residential_score, nonres_overlap, nearest_building_m) を返す。
+
+    公園等の園路は配布対象から外すが connector として形状自体は保持する。
+    住宅へのアクセスがある道は建物近接判定により残す。
+    """
+    nearest = 9999.0 if building_union is None else float(building_union.distance(geom_m))
+    corridor = geom_m.buffer(25.0, cap_style=2)
+    if building_union is None or corridor.is_empty or corridor.area <= 0:
+        cover = 0.0
+    else:
+        try:
+            cover = float(building_union.intersection(corridor).area / corridor.area)
+        except Exception:
+            cover = 0.0
+    if nonres_union is None or geom_m.length <= 0:
+        nonres_overlap = 0.0
+    else:
+        try:
+            nonres_overlap = float(nonres_union.intersection(geom_m).length / geom_m.length)
+        except Exception:
+            nonres_overlap = 0.0
+
+    # 建物近接と25mコリドー内建物面積から0..1の住宅スコアを作る。
+    if nearest <= 8:
+        proximity = 1.0
+    elif nearest <= 18:
+        proximity = 0.8
+    elif nearest <= 30:
+        proximity = 0.55
+    elif nearest <= 45:
+        proximity = 0.25
+    else:
+        proximity = 0.05
+    residential_score = max(0.0, min(1.0, 0.65 * proximity + min(0.35, cover * 5.0)))
+
+    low_value_types = {"footway", "path", "pedestrian", "steps", "cycleway"}
+    posting_target = True
+    # 公園・学校・緑地内の園路で、近くに配布先建物が無いものは巡回必須から外す。
+    if highway in low_value_types and nonres_overlap >= 0.45 and nearest > 28.0:
+        posting_target = False
+    # 公園ポリゴンが未整備でも、住宅から遠い歩行者専用路は原則connector扱い。
+    if highway in {"footway", "path", "steps", "cycleway"} and nearest > 45.0 and residential_score < 0.18:
+        posting_target = False
+    # 駐車場内を何周もするのを防ぐ。建物入口に近い場合だけ対象として残す。
+    if highway == "service" and service in {"parking_aisle", "parking"} and nearest > 18.0:
+        posting_target = False
+    return posting_target, residential_score, nonres_overlap, nearest
+
+
 def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
     """Overpass道路を町丁目内の巡回可能な形状へ切り出す。
 
-    v1.0.10:
+    v1.0.12:
     - 境界道路を『探す』8m帯と、実際に『歩いてよい』1.5m帯を分離。
+    - 建物密度と公園・学校・緑地ポリゴンを使い、配布先のない園路をconnector-only化。
     - 通常道路は町丁目＋1.5mでクリップ。
     - 1.5〜8mの外側帯は境界と平行な道路だけ例外採用。
     - 境界から外向きに伸びる交差点枝は巡回グラフへ入れない。
@@ -237,6 +359,7 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
     fwd, inv = _metric_transformers(boundary)
     boundary_m = transform(fwd, boundary)
     boundary_line_m = boundary_m.boundary
+    building_union_m, nonres_union_m = _context_unions(data, fwd)
     candidate_region = boundary_m.buffer(candidate_buffer_m)
     safe_region = boundary_m.buffer(walk_tolerance_m)
 
@@ -274,11 +397,18 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
         for geom_m in _as_lines(merged):
             if geom_m.length < 0.5:
                 continue
+            posting_target, residential_score, nonres_overlap, nearest_building_m = _road_context_score(
+                geom_m, highway, tags.get("service", ""), building_union_m, nonres_union_m
+            )
             geom = transform(inv, geom_m)
             roads.append({
                 "id": element.get("id"), "highway": highway, "name": tags.get("name", ""),
                 "access": tags.get("access", ""), "service": tags.get("service", ""),
                 "foot": tags.get("foot", ""), "boundary_near": not geom.within(boundary),
+                "posting_target": posting_target,
+                "residential_score": round(residential_score, 3),
+                "nonresidential_overlap": round(nonres_overlap, 3),
+                "nearest_building_m": round(nearest_building_m, 1),
                 "geometry": geom,
             })
     return roads
