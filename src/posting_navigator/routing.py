@@ -200,7 +200,7 @@ def _cluster_component_outward(
     total = sum(float(d.get("length", 0.0)) for _, _, _, d in edges)
     if target_length_m is None:
         # 小区域は細かく割りすぎず、大区域でも1クラスタが巨大化しない。
-        target_length_m = min(600.0, max(320.0, total / max(4, min(12, round(total / 480.0) or 1))))
+        target_length_m = min(950.0, max(520.0, total / max(3, min(9, round(total / 760.0) or 1))))
 
     refs = {(u, v, k) for u, v, k, _ in edges}
     data_by_ref = {(u, v, k): d for u, v, k, d in edges}
@@ -304,6 +304,126 @@ def _eulerize_open(g: nx.MultiGraph, start, end) -> nx.MultiGraph:
             edge_data["duplicated"] = True
             out.add_edge(a, b, **edge_data)
     return out
+
+
+
+def _edge_departure_bearing(node, other, data: dict) -> float:
+    """nodeからotherへ出るときの道路接線方向。"""
+    geom = data.get("geometry") if data else None
+    if geom is not None and not geom.is_empty:
+        coords = _orient_coords(geom.coords, node, other)
+        return _bearing_over_distance(list(coords), from_start=True, sample_m=8.0)
+    return _bearing(node, other)
+
+
+def _trail_quality(trail: list[tuple], radial: dict | None = None) -> tuple:
+    """Euler候補の現場向け品質。
+
+    1) 来た道への即時折返し、2) 180度Uターン、3) 内側を残したまま遠方へ行く挙動、
+    4) 外側から内側への戻り量、5) 総旋回量、の順で小さい候補を採用する。
+    """
+    immediate_reverse = 0
+    hard_uturn = 0
+    turn_sum = 0.0
+    inward_m = 0.0
+    edge_r = []
+    for i, (u, v, k, data) in enumerate(trail):
+        if radial is not None:
+            ru, rv = radial.get(u, 0.0), radial.get(v, 0.0)
+            edge_r.append(min(ru, rv))
+            inward_m += max(0.0, ru - rv)
+        if i + 1 >= len(trail):
+            continue
+        a, b, _, next_data = trail[i + 1]
+        if u == b and v == a:
+            immediate_reverse += 1
+        incoming = _edge_departure_bearing(u, v, data)
+        outgoing = _edge_departure_bearing(a, b, next_data)
+        diff = abs(((outgoing - incoming + 540) % 360) - 180)
+        turn_sum += diff
+        if diff >= 155:
+            hard_uturn += 1
+    premature = 0.0
+    if radial is not None and edge_r:
+        suffix_min = [0.0] * len(edge_r)
+        m = math.inf
+        for i in range(len(edge_r) - 1, -1, -1):
+            m = min(m, edge_r[i])
+            suffix_min[i] = m
+        # 150m以上内側の未処理道路を残して外側へ行く動きを減点。
+        for i, r in enumerate(edge_r[:-1]):
+            gap = r - suffix_min[i + 1] - 150.0
+            if gap > 0:
+                premature += gap
+    return (immediate_reverse, hard_uturn, round(premature, 2), round(inward_m, 2), round(turn_sum, 2))
+
+
+def _turn_aware_euler_trail(g: nx.MultiGraph, start, end=None, samples: int = 96, radial: dict | None = None):
+    """距離最適性を保ったまま、現場で歩きやすいEuler順序を探索する。"""
+    import random
+    edge_rows = [(u, v, dict(data)) for u, v, _, data in g.edges(keys=True, data=True)]
+    if not edge_rows:
+        return []
+    best = None
+    best_score = None
+    # 同一入力なら同じルートになる固定seed。道路数が少ないときは探索数を抑える。
+    sample_count = min(samples, max(16, len(edge_rows) // 3))
+    for seed in range(sample_count):
+        rows = edge_rows[:]
+        if seed:
+            random.Random(seed * 104729 + len(rows)).shuffle(rows)
+        h = nx.MultiGraph()
+        for u, v, data in rows:
+            h.add_edge(u, v, **data)
+        try:
+            raw = (list(nx.eulerian_circuit(h, source=start, keys=True))
+                   if end is None or start == end
+                   else list(nx.eulerian_path(h, source=start, keys=True)))
+        except nx.NetworkXError:
+            continue
+        trail = [(u, v, k, dict(h[u][v][k])) for u, v, k in raw]
+        if end is not None and trail and trail[-1][1] != end:
+            continue
+        score = _trail_quality(trail, radial=radial)
+        if best_score is None or score < best_score:
+            best_score, best = score, trail
+            if score[0] == 0 and score[1] == 0 and score[2] == 0:
+                break
+    if best is None:
+        raise nx.NetworkXError("Euler路候補を生成できません")
+    return best
+
+
+def _cluster_exit_node(comp_graph: nx.MultiGraph, cluster_graph: nx.MultiGraph, entry, radial: dict, next_cluster: dict | None):
+    """クラスタ途中で引き返さず、次の塊へ抜けやすい交差点を出口にする。"""
+    nodes = list(cluster_graph.nodes)
+    if len(nodes) <= 1:
+        return entry
+    # クラスタ外の辺に接続するnodeのみを出口候補にする。なければ全node。
+    cluster_edges = {frozenset((u, v)) for u, v in cluster_graph.edges()}
+    boundary = []
+    for n in nodes:
+        if any(frozenset((a, b)) not in cluster_edges for a, b in comp_graph.edges(n)):
+            boundary.append(n)
+    candidates = boundary or nodes
+    if next_cluster:
+        target_nodes = set(next_cluster.get("nodes", ()))
+        shared = [n for n in candidates if n in target_nodes]
+        if shared:
+            # 同じ交差点で次クラスタへ入れるならそこが最優先。
+            return max(shared, key=lambda n: radial.get(n, 0.0))
+        # 次クラスタからの道路距離を一度だけ計算し、最も自然につながる出口を選ぶ。
+        try:
+            dist_to_next = nx.multi_source_dijkstra_path_length(comp_graph, target_nodes, weight="route_cost")
+        except Exception:
+            dist_to_next = {}
+        entry_r = radial.get(entry, 0.0)
+        def score(n):
+            regression = max(0.0, entry_r - radial.get(n, 0.0))
+            return (dist_to_next.get(n, math.inf) + regression * 2.5, -radial.get(n, 0.0))
+        return min(candidates, key=score)
+    # 最終クラスタだけは外側へ抜けて終える。
+    return max(candidates, key=lambda n: radial.get(n, 0.0))
 
 
 def _append_shortest_path_steps(full_graph: nx.MultiGraph, start, end, steps: list[dict], component: int) -> float:
@@ -476,12 +596,11 @@ def build_navigation_legs(steps: list[dict]) -> list[dict]:
     return result
 
 def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
-    """開始地点の近隣を局所完結させながら外側へ広がる1町丁目1ルートを生成する。
+    """重複距離を抑えつつ、近い道路から外側へ進む1町丁目1ルートを生成する。
 
-    町丁目全体を一度にEuler化せず、道路を連結した小クラスタへ分ける。
-    各クラスタは開始地点からの道路距離が概ね増える順に処理し、クラスタ内では
-    open Chinese Postman trailを使って「入口→外側の出口」へ抜けることで、
-    近所を残して遠方へ行き後から戻る動きを抑える。
+    v1.1.1ではクラスタごとの個別Euler化をやめ、連結成分全体を一度だけOpen Chinese
+    Postman化する。これにより重複辺を全体最適化したうえで、多数存在する同距離のEuler路
+    の中から折返し/Uターン/内側道路の取り残しが少ない順序を選ぶ。
     """
     source_graph = build_graph(roads)
     source_length = sum(d["length"] for _, _, d in source_graph.edges(data=True))
@@ -490,7 +609,6 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
     if not components:
         raise ValueError("巡回ルートを生成できませんでした")
 
-    # 開始地点を含む/最も近い成分を先頭にする。別成分間を道路外直線で結ばない。
     if start_point is None:
         first_comp = max(components, key=lambda c: source_graph.subgraph(c).number_of_edges())
     else:
@@ -504,11 +622,10 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
     steps: list[dict] = []
     duplicated_length = 0.0
     major_duplicated = 0.0
-    transfer_length = 0.0
     first_start = None
-    current_node = None
     skipped_disconnected_length = 0.0
-    cluster_count = 0
+    current_node = None
+    optimized_components = 0
 
     for component_index, nodes in enumerate(component_sets, start=1):
         comp_graph = source_graph.subgraph(nodes).copy()
@@ -517,55 +634,44 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         elif current_node in comp_graph:
             comp_start = current_node
         else:
-            # 実道路でつながっていない別成分は偽の直線で接続しない。
-            # 小さな孤立成分は診断値として残し、ルート本体からは除外する。
+            # 道路外の直線接続は禁止。孤立した微小成分は診断値に残す。
             skipped_disconnected_length += sum(d.get("length", 0.0) for _, _, d in comp_graph.edges(data=True))
             continue
         if first_start is None:
             first_start = comp_start
 
         radial = _node_radial_distances(comp_graph, comp_start)
-        clusters = _cluster_component_outward(comp_graph, comp_start)
-        cluster_count += len(clusters)
-        current_node = comp_start
+        # STARTから最も外側の実交差点/行止まりをGOAL候補にすることで、最後に内側へ戻る量を減らす。
+        end_candidates = [n for n in comp_graph.nodes if comp_graph.degree(n) != 2] or list(comp_graph.nodes)
+        comp_end = max(end_candidates, key=lambda n: radial.get(n, 0.0))
+        if comp_end == comp_start and comp_graph.number_of_nodes() > 1:
+            comp_end = max(comp_graph.nodes, key=lambda n: radial.get(n, 0.0))
 
-        for cluster_index, cluster in enumerate(clusters, start=1):
-            cluster_graph = _graph_from_edge_refs(comp_graph, cluster["edges"])
-            if cluster_graph.number_of_edges() == 0:
-                continue
-            entry = _nearest_node(cluster_graph, current_node)
-            if current_node != entry:
-                transfer_length += _append_shortest_path_steps(comp_graph, current_node, entry, steps, component_index)
-            # 入口から見て外側のnodeを出口にし、クラスタを抜けながら処理する。
-            exit_node = max(cluster_graph.nodes, key=lambda n: radial.get(n, 0.0))
-            if exit_node == entry and cluster_graph.number_of_nodes() > 1:
-                exit_node = max(cluster_graph.nodes, key=lambda n: _dist_m(n, entry))
-            routed = _eulerize_open(cluster_graph, entry, exit_node)
-            try:
-                trail = list(nx.eulerian_path(routed, source=entry, keys=True)) if entry != exit_node else list(nx.eulerian_circuit(routed, source=entry, keys=True))
-            except nx.NetworkXError:
-                # parityが特殊な小クラスタでは閉路へフォールバック。
-                routed = eulerize_weighted(cluster_graph)
-                trail = list(nx.eulerian_circuit(routed, source=entry, keys=True))
-                exit_node = entry
-            for u, v, k in trail:
-                data = routed[u][v][k]
-                s = _step(u, v, data, len(steps) + 1, component=component_index)
-                steps.append(s)
-                if s["duplicated"]:
-                    duplicated_length += s["length_m"]
-                    if s["highway"] in {"primary", "primary_link", "secondary", "secondary_link"}:
-                        major_duplicated += s["length_m"]
-            current_node = exit_node
+        routed = _eulerize_open(comp_graph, comp_start, comp_end)
+        try:
+            trail = _turn_aware_euler_trail(routed, comp_start, comp_end, samples=128, radial=radial)
+        except nx.NetworkXError:
+            # 特殊parity時だけ閉路へフォールバック。ただし順序最適化は同じものを使う。
+            routed = eulerize_weighted(comp_graph)
+            comp_end = comp_start
+            trail = _turn_aware_euler_trail(routed, comp_start, comp_start, samples=128, radial=radial)
+
+        for u, v, k, data in trail:
+            st = _step(u, v, data, len(steps) + 1, component=component_index)
+            steps.append(st)
+            if st["duplicated"]:
+                duplicated_length += st["length_m"]
+                if st["highway"] in {"primary", "primary_link", "secondary", "secondary_link"}:
+                    major_duplicated += st["length_m"]
+        current_node = comp_end
+        optimized_components += 1
 
     if not steps or first_start is None:
         raise ValueError("巡回ルートを生成できませんでした")
 
-    # route_stepsは道路Geometryのみ。非連続箇所を直線で描画しないため、route本体は
-    # 連続している最初の系列だけLineString化し、表示はroute_stepsを正とする。
     coords = []
-    for s in steps:
-        c = list(s["geometry"].coords)
+    for st in steps:
+        c = list(st["geometry"].coords)
         if not coords:
             coords.extend(c)
         elif _dist_m(coords[-1], c[0]) <= 1.5:
@@ -573,8 +679,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         else:
             break
     route = LineString(coords) if len(coords) >= 2 else steps[0]["geometry"]
-    route_length = sum(s["length_m"] for s in steps)
-    covered_steps = [s for s in steps if not s["transfer"]]
+    route_length = sum(st["length_m"] for st in steps)
     navigation_legs = build_navigation_legs(steps)
     return {
         "geometry": route,
@@ -583,22 +688,23 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "start_point": Point(first_start),
         "requested_start": Point(start_point) if start_point else None,
         "source_edges": source_graph.number_of_edges(),
-        "route_edges": len(covered_steps),
+        "route_edges": len(steps),
         "source_length_m": round(source_length, 1),
         "route_length_m": round(route_length, 1),
-        "transfer_length_m": round(transfer_length, 1),
+        "transfer_length_m": 0.0,
         "duplicated_length_m": round(duplicated_length, 1),
         "major_road_duplicated_m": round(major_duplicated, 1),
-        "duplication_ratio": round((route_length - transfer_length) / max(source_length - skipped_disconnected_length, 1.0), 3),
+        "duplication_ratio": round(route_length / max(source_length - skipped_disconnected_length, 1.0), 3),
         "connected_nodes": source_graph.number_of_nodes(),
         "component_count": len(component_sets),
-        "cluster_count": cluster_count,
+        "cluster_count": optimized_components,
         "skipped_disconnected_length_m": round(skipped_disconnected_length, 1),
         "dead_end_count": len(dead_ends),
-        "routing_strategy": "local-clusters-outward",
+        "routing_strategy": "global-open-postman-turn-aware-outward",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
+
 
 def split_route(route: dict, workers: int) -> list[dict]:
     """巡回順序を保ったまま担当区間を距離均等分割する。"""
