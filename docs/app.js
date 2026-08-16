@@ -1,7 +1,7 @@
 const configured=(window.POSTING_NAVIGATOR_API||'').replace(/\/$/,'');
 const API=configured || location.origin;
 const $=id=>document.getElementById(id);
-const state={uploadId:null,jobId:null,geojson:null,summary:null,projectId:null,shareCode:null,workerId:1,watchId:null,current:null,completed:new Set(),segments:[],segmentLengths:[],layers:{},syncTimer:null,config:{gps_threshold_m:18,sync_interval_ms:5000},sessionToken:localStorage.getItem('pn_session')||'',user:null};
+const state={uploadId:null,jobId:null,geojson:null,areaGeojson:null,summary:null,projectId:null,shareCode:null,workerId:1,watchId:null,current:null,completed:new Set(),segments:[],segmentLengths:[],layers:{},syncTimer:null,config:{gps_threshold_m:18,sync_interval_ms:5000},sessionToken:localStorage.getItem('pn_session')||'',user:null};
 const map=L.map('map').setView([35.7005,139.6925],16);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'© OpenStreetMap contributors'}).addTo(map);
 
@@ -17,11 +17,39 @@ map.on('click',e=>{if(state.layers.start)state.layers.start.remove();$('lat').va
 
 $('useCurrent').onclick=()=>navigator.geolocation?.getCurrentPosition(p=>{const {latitude,longitude}=p.coords;$('lat').value=latitude.toFixed(7);$('lon').value=longitude.toFixed(7);map.setView([latitude,longitude],18)},e=>status('status',`現在地を取得できません: ${e.message}`,'error'),{enableHighAccuracy:true});
 
-$('kmz').onchange=async()=>{const f=$('kmz').files[0];if(!f)return;status('status','KMZを解析中…');$('build').disabled=true;const fd=new FormData();fd.append('kmz',f);try{const r=await fetch(`${API}/api/areas`,{method:'POST',body:fd,headers:authHeaders()});const j=await r.json();if(!r.ok)throw Error(j.error);state.uploadId=j.upload_id;$('area').innerHTML=j.areas.map(x=>`<option>${escapeHtml(x)}</option>`).join('');$('area').disabled=false;$('build').disabled=false;status('status',`${j.areas.length}件の区画を読み込みました。`,'success')}catch(e){status('status',e.message,'error')}};
+$('kmz').onchange=async()=>{const f=$('kmz').files[0];if(!f)return;status('status','KMZを解析中…');$('build').disabled=true;const fd=new FormData();fd.append('kmz',f);try{const r=await fetch(`${API}/api/areas`,{method:'POST',body:fd,headers:authHeaders()});const j=await r.json();if(!r.ok)throw Error(j.error);state.uploadId=j.upload_id;state.areaGeojson=j.area_geojson||null;$('area').innerHTML=j.areas.map(x=>`<option>${escapeHtml(x)}</option>`).join('');$('area').disabled=false;$('build').disabled=false;renderAreaBoundaries(true);status('status',`${j.areas.length}件の区画を読み込みました。地図に町丁目境界を表示しています。`,'success')}catch(e){status('status',e.message,'error')}};
+
+
+$('area').onchange=()=>renderAreaBoundaries(true);
+
+function renderAreaBoundaries(fitSelected=false){
+  if(state.layers.areas){state.layers.areas.remove();state.layers.areas=null}
+  if(!state.areaGeojson)return;
+  const selected=$('area').value;
+  let selectedLayer=null;
+  state.layers.areas=L.geoJSON(state.areaGeojson,{
+    style:f=>{
+      const active=f.properties?.name===selected;
+      return active
+        ? {color:'#2563eb',weight:4,opacity:.95,fillColor:'#3b82f6',fillOpacity:.14}
+        : {color:'#64748b',weight:1.5,opacity:.65,fillColor:'#94a3b8',fillOpacity:.035};
+    },
+    onEachFeature:(f,layer)=>{
+      const name=f.properties?.name||'';
+      layer.bindTooltip(name,{sticky:true,direction:'center',className:'area-tooltip'});
+      if(name===selected)selectedLayer=layer;
+    }
+  }).addTo(map);
+  if(fitSelected&&selectedLayer){
+    const b=selectedLayer.getBounds();
+    if(b.isValid())map.fitBounds(b,{padding:[35,35]});
+    selectedLayer.bringToFront?.();
+  }
+}
 
 $('build').onclick=async()=>{status('status','道路取得・巡回計算・KML生成を実行中…');$('build').disabled=true;$('downloads').classList.add('hidden');try{const j=await api('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({upload_id:state.uploadId,area:$('area').value,workers:+$('workers').value,start_lat:$('lat').value,start_lon:$('lon').value,offline_fallback:$('fallback').checked})});state.jobId=j.job_id;state.geojson=j.geojson;state.summary=j.summary;renderGeneratedMap();renderMetrics();renderDownloads();status('status',`生成完了（道路データ: ${j.summary.data_mode}）`,'success');await createSharedProject();prepareWorkerUI();activateTab('field')}catch(e){status('status',e.message,'error')}finally{$('build').disabled=false}};
 
-function renderGeneratedMap(){clearRouteLayers();state.layers.generated=L.geoJSON(state.geojson,{style:f=>{const k=f.properties?.kind;if(k==='area')return{weight:2,color:'#2563eb',fillOpacity:.05};if(k==='road')return{weight:1,color:'#94a3b8',opacity:.35};if(k==='worker_route')return{weight:5,color:'#ef4444',opacity:.75};if(k==='route')return{weight:3,color:'#f59e0b',opacity:.35};return{weight:2,color:'#64748b'}}}).addTo(map);const b=state.layers.generated.getBounds();if(b.isValid())map.fitBounds(b,{padding:[15,15]})}
+function renderGeneratedMap(){clearRouteLayers();state.layers.generated=L.geoJSON(state.geojson,{style:f=>{const k=f.properties?.kind;if(k==='area')return state.areaGeojson?{weight:0,opacity:0,fillOpacity:0}:{weight:4,color:'#2563eb',opacity:.95,fillColor:'#3b82f6',fillOpacity:.14};if(k==='road')return{weight:1,color:'#94a3b8',opacity:.35};if(k==='worker_route')return{weight:5,color:'#ef4444',opacity:.75};if(k==='route')return{weight:3,color:'#f59e0b',opacity:.35};return{weight:2,color:'#64748b'}}}).addTo(map);const b=state.layers.generated.getBounds();if(b.isValid())map.fitBounds(b,{padding:[15,15]})}
 function clearRouteLayers(){['generated','todo','done','gps'].forEach(k=>{if(state.layers[k]){state.layers[k].remove();state.layers[k]=null}})}
 function renderMetrics(){const s=state.summary;$('metrics').innerHTML=`<div class="metric">全体距離<b>${(s.route_length_m/1000).toFixed(2)} km</b></div><div class="metric">担当人数<b>${s.worker_count}人</b></div><div class="metric">重複倍率<b>${(s.route_ratio||s.duplication_ratio||0).toFixed(2)}</b></div>`;$('metrics').classList.remove('hidden')}
 function renderDownloads(){const base=`${API}/download/${state.jobId}`;$('downloads').innerHTML=`<label>成果物</label><a href="${base}/posting_navigator_results.zip">一式ZIP</a><a href="${base}/posting_navigator.kmz">統合KMZ</a><a href="${base}/posting_navigator.kml">統合KML</a><a href="${base}/assignments.csv">担当CSV</a><a href="${base}/summary.json">集計JSON</a>`;$('downloads').classList.remove('hidden')}
@@ -36,7 +64,7 @@ $('fieldWorker').onchange=()=>loadWorker(+$('fieldWorker').value);
 function workerFeatures(){return (state.geojson?.features||[]).filter(f=>f.properties?.kind==='worker_route').sort((a,b)=>a.properties.worker_id-b.properties.worker_id)}
 function loadWorker(workerId){state.workerId=workerId;const feat=workerFeatures().find(f=>+f.properties.worker_id===workerId);if(!feat)return;const coords=feat.geometry.coordinates;state.segments=[];state.segmentLengths=[];for(let i=0;i<coords.length-1;i++){state.segments.push([coords[i],coords[i+1]]);state.segmentLengths.push(haversine(coords[i][1],coords[i][0],coords[i+1][1],coords[i+1][0]))}const key=progressKey();let saved=[];try{saved=JSON.parse(localStorage.getItem(key)||'[]')}catch{}state.completed=new Set(saved);$('fieldWorkerName').textContent=feat.properties.name||`担当${workerId}`;drawFieldRoute();updateFieldProgress();pullProgress()}
 function progressKey(){return `pn_progress_${state.projectId||'local'}_${state.workerId}`}
-function drawFieldRoute(){if(state.layers.generated){state.layers.generated.remove();state.layers.generated=null}if(state.layers.todo)state.layers.todo.remove();if(state.layers.done)state.layers.done.remove();const todo=[],done=[];state.segments.forEach((s,i)=>(state.completed.has(i)?done:todo).push({type:'Feature',properties:{segment:i},geometry:{type:'LineString',coordinates:s}}));state.layers.todo=L.geoJSON({type:'FeatureCollection',features:todo},{style:{color:'#ef4444',weight:7,opacity:.82}}).addTo(map);state.layers.done=L.geoJSON({type:'FeatureCollection',features:done},{style:{color:'#22c55e',weight:8,opacity:.95}}).addTo(map);const both=L.featureGroup([state.layers.todo,state.layers.done]);const b=both.getBounds();if(b.isValid())map.fitBounds(b,{padding:[20,20]})}
+function drawFieldRoute(){if(!state.areaGeojson&&state.geojson){const areaOnly={type:'FeatureCollection',features:(state.geojson.features||[]).filter(f=>f.properties?.kind==='area')};if(areaOnly.features.length){state.areaGeojson=areaOnly;renderAreaBoundaries(false)}}if(state.layers.generated){state.layers.generated.remove();state.layers.generated=null}if(state.layers.todo)state.layers.todo.remove();if(state.layers.done)state.layers.done.remove();const todo=[],done=[];state.segments.forEach((s,i)=>(state.completed.has(i)?done:todo).push({type:'Feature',properties:{segment:i},geometry:{type:'LineString',coordinates:s}}));state.layers.todo=L.geoJSON({type:'FeatureCollection',features:todo},{style:{color:'#ef4444',weight:7,opacity:.82}}).addTo(map);state.layers.done=L.geoJSON({type:'FeatureCollection',features:done},{style:{color:'#22c55e',weight:8,opacity:.95}}).addTo(map);const both=L.featureGroup([state.layers.todo,state.layers.done]);const b=both.getBounds();if(b.isValid())map.fitBounds(b,{padding:[20,20]})}
 function updateFieldProgress(){const done=[...state.completed].reduce((s,i)=>s+(state.segmentLengths[i]||0),0), total=state.segmentLengths.reduce((a,b)=>a+b,0),pct=total?done/total*100:0;$('fieldPercent').textContent=`${pct.toFixed(1)}%`;$('fieldDistance').textContent=`${(done/1000).toFixed(2)} / ${(total/1000).toFixed(2)} km`;localStorage.setItem(progressKey(),JSON.stringify([...state.completed]));return{done,total,pct}}
 $('gpsThreshold').oninput=()=>$('gpsThresholdText').textContent=$('gpsThreshold').value;
 

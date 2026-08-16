@@ -16,7 +16,7 @@ from flask import Flask, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-from .kmz import list_areas_from_kmz
+from .kmz import list_areas_from_kmz, list_area_geojson_from_kmz
 from .service import run_build
 
 BASE = Path.cwd()
@@ -116,13 +116,13 @@ def public_file(filename: str):
 
 @app.get("/api/health")
 def api_health():
-    return jsonify(status="ok", service="posting-navigator-api", version="1.0.0")
+    return jsonify(status="ok", service="posting-navigator-api", version="1.0.1")
 
 
 @app.get("/api/config")
 def api_config():
     return jsonify(
-        version="1.0.0",
+        version="1.0.1",
         google_client_id=os.getenv("GOOGLE_CLIENT_ID", ""),
         gps_threshold_m=float(os.getenv("GPS_THRESHOLD_M", "18")),
         sync_interval_ms=int(os.getenv("SYNC_INTERVAL_MS", "5000")),
@@ -185,10 +185,11 @@ def api_areas():
     file.save(path)
     try:
         areas = list_areas_from_kmz(path)
+        area_geojson = list_area_geojson_from_kmz(path)
     except Exception as exc:
         path.unlink(missing_ok=True)
         return jsonify(error=f"KMZを解析できません: {exc}"), 400
-    return jsonify(upload_id=upload_id, areas=areas)
+    return jsonify(upload_id=upload_id, areas=areas, area_geojson=area_geojson)
 
 
 @app.post("/api/build")
@@ -218,7 +219,7 @@ def api_build():
             kmz=kmz, area=area, output=out, workers=workers,
             start_lat=start_lat, start_lon=start_lon,
             cache=RUNTIME / "cache" / f"{area}.json",
-            offline_fallback=bool(payload.get("offline_fallback", True)),
+            offline_fallback=bool(payload.get("offline_fallback", False)),
         )
         bundle = out / "posting_navigator_results.zip"
         with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as zf:

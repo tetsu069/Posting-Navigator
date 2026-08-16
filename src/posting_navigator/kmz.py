@@ -38,6 +38,41 @@ def list_areas_from_kmz(kmz_path: str | Path) -> list[str]:
             names.append(name)
     return names
 
+
+def list_area_geojson_from_kmz(kmz_path: str | Path) -> dict:
+    """KMZ内の全町丁目PolygonをGeoJSON FeatureCollectionとして返す。"""
+    kmz_path = Path(kmz_path)
+    with zipfile.ZipFile(kmz_path) as zf:
+        kml_names = [n for n in zf.namelist() if n.lower().endswith(".kml")]
+        if not kml_names:
+            raise ValueError("KMZ内にKMLがありません")
+        root = etree.fromstring(zf.read(kml_names[0]))
+
+    features = []
+    seen: set[str] = set()
+    for pm in root.xpath("//k:Placemark", namespaces=KML_NS):
+        name = (pm.findtext("{http://www.opengis.net/kml/2.2}name") or "").strip()
+        if not name or name in seen:
+            continue
+        outer = pm.xpath(
+            "string(.//k:Polygon[1]/k:outerBoundaryIs/k:LinearRing/k:coordinates)",
+            namespaces=KML_NS,
+        )
+        if not outer.strip():
+            continue
+        poly = make_valid(Polygon(_parse_coordinates(outer)))
+        if poly.geom_type == "MultiPolygon":
+            poly = max(poly.geoms, key=lambda g: g.area)
+        if poly.is_empty:
+            continue
+        seen.add(name)
+        features.append({
+            "type": "Feature",
+            "properties": {"name": name},
+            "geometry": mapping(poly),
+        })
+    return {"type": "FeatureCollection", "features": features}
+
 def load_area_from_kmz(kmz_path: str | Path, area_name: str) -> Polygon:
     """KMZ内から完全一致するPlacemarkの最初のPolygonを返す。"""
     kmz_path = Path(kmz_path)

@@ -1,6 +1,16 @@
-# Posting Navigator v1.0
+# Posting Navigator v1.0.1
 
 町丁目KMZとOpenStreetMap道路からポスティング巡回ルートを生成し、現場ではスマホGPSで配布済み区間を自動記録するWeb/PWAです。GitHub Pagesを画面、RenderをPython APIとして利用できます。
+
+
+## v1.0.1 で追加・修正
+
+- KMZ読込直後から全町丁目の境界を地図に薄く表示
+- 選択中の町丁目を青い太線＋薄い塗りで強調
+- 境界上にマウスを置くと町丁目名を表示
+- 現場モードでも選択エリア境界を維持
+- 公開Web版ではOSM取得失敗時の確認用ダミーデータ利用を既定OFFに変更
+- `requirements.txt` を同梱し、Renderへの初回デプロイを簡略化
 
 ## v1.0で追加
 

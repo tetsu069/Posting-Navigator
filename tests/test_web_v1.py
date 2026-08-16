@@ -10,7 +10,7 @@ def test_health_and_config(tmp_path, monkeypatch):
     monkeypatch.setenv('POSTING_NAV_DB', str(tmp_path / 'test.db'))
     from posting_navigator.webapp import app
     c = app.test_client()
-    assert c.get('/api/health').get_json()['version'] == '1.0.0'
+    assert c.get('/api/health').get_json()['version'] == '1.0.1'
     cfg = c.get('/api/config').get_json()
     assert cfg['gps_threshold_m'] > 0
 
@@ -34,3 +34,17 @@ def test_project_progress_roundtrip(tmp_path, monkeypatch):
     j = c.get(f'/api/projects/{pid}/progress').get_json()
     assert j['workers'][0]['percent'] == 25.0
     assert j['workers'][0]['completed_segments'] == [0,1,2]
+
+
+def test_areas_returns_boundary_geojson():
+    import io
+    import posting_navigator.webapp as w
+    kmz = Path(__file__).parents[1] / 'data' / 'input' / 'shinjuku_posting_map.kmz'
+    c = w.app.test_client()
+    with kmz.open('rb') as fh:
+        r = c.post('/api/areas', data={'kmz': (io.BytesIO(fh.read()), 'areas.kmz')}, content_type='multipart/form-data')
+    assert r.status_code == 200
+    j = r.get_json()
+    assert j['areas']
+    assert j['area_geojson']['type'] == 'FeatureCollection'
+    assert len(j['area_geojson']['features']) == len(j['areas'])

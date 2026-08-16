@@ -63,7 +63,7 @@ def main() -> int:
     p.add_argument("--area", required=True)
     p.add_argument("--output", default="output")
     p.add_argument("--cache", default="data/cache/osm_roads.json")
-    p.add_argument("--offline-fallback", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--offline-fallback", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--start-lon", type=float, help="開始地点の経度（最寄り道路ノードへ補正）")
     p.add_argument("--start-lat", type=float, help="開始地点の緯度（最寄り道路ノードへ補正）")
     p.add_argument("--workers", type=int, default=1, help="担当者数。巡回ルートを距離均等に連続分割（既定: 1）")
