@@ -72,23 +72,43 @@ function routeStepFeatures(){return (state.geojson?.features||[]).filter(f=>f.pr
 function navigationLegFeatures(){return (state.geojson?.features||[]).filter(f=>f.properties?.kind==='navigation_leg').sort((a,b)=>(a.properties.leg||0)-(b.properties.leg||0))}
 function renderGeneratedMap(){
   clearRouteLayers();
+  const workers=workerFeatures(), workerAreas=workerAreaFeatures();
+  const multi=workers.length>1;
   const steps=routeStepFeatures(), legs=navigationLegFeatures();
-  state.navLegs=legs;state.activeGuideLeg=0;
+  state.navLegs=multi?[]:legs;state.activeGuideLeg=0;
   const hasSteps=steps.length>0;
   state.layers.generated=L.geoJSON(state.geojson,{
-    filter:f=>{const k=f.properties?.kind;return k!=='navigation_leg' && !(hasSteps&&(k==='route'||k==='worker_route'))},
+    filter:f=>{const k=f.properties?.kind;
+      if(k==='navigation_leg'||k==='worker_navigation_leg'||k==='worker_route_step')return false;
+      if(multi && (k==='route'||k==='route_step'||k==='start'))return false;
+      if(!multi && (k==='worker_area'||k==='worker_route'))return false;
+      return !(hasSteps&&!multi&&k==='route');
+    },
     style:f=>{
       const k=f.properties?.kind;
-      if(k==='area')return state.areaGeojson?{weight:0,opacity:0,fillOpacity:0}:{weight:4,color:'#2563eb',opacity:.95,fillColor:'#3b82f6',fillOpacity:.14};
-      if(k==='road')return{weight:1.0,color:'#94a3b8',opacity:.20};
+      if(k==='area')return state.areaGeojson?{weight:0,opacity:0,fillOpacity:0}:{weight:4,color:'#2563eb',opacity:.95,fillColor:'#3b82f6',fillOpacity:.10};
+      if(k==='worker_area'){const c=WORKER_COLORS[(+f.properties.worker_id-1)%WORKER_COLORS.length];return{weight:3,color:c,opacity:.9,fillColor:c,fillOpacity:.10}}
+      if(k==='worker_route'){const c=WORKER_COLORS[(+f.properties.worker_id-1)%WORKER_COLORS.length];return{weight:6,color:c,opacity:.92,lineCap:'round',lineJoin:'round'}}
+      if(k==='road')return{weight:1.0,color:'#94a3b8',opacity:.18};
       if(k==='route_step'){if(f.properties.transfer)return{weight:3,color:'#64748b',opacity:.45,dashArray:'8 8'};if(f.properties.duplicated)return{weight:4,color:'#f59e0b',opacity:.58};return{weight:4,color:'#ef4444',opacity:.50}}
       return{weight:2,color:'#64748b'}
-    }
+    },
+    onEachFeature:(f,l)=>{if(f.properties?.kind==='worker_area'||f.properties?.kind==='worker_route'){const p=f.properties;l.bindTooltip(`${p.name||'担当'}${p.estimated_households?` ・ 推定${p.estimated_households}世帯`:''}${p.length_m?` ・ ${(p.length_m/1000).toFixed(2)}km`:''}`)}}
   }).addTo(map);
-  renderRouteGuide(legs);
-  drawRouteEndpoints(legs.length?legs:steps);
-  if(legs.length)focusGuideLeg(0,false);
+  if(multi){renderWorkerSummary(workers);$('routeGuide')?.classList.add('hidden')}else{renderRouteGuide(legs);drawRouteEndpoints(legs.length?legs:steps);if(legs.length)focusGuideLeg(0,false)}
   const b=state.layers.generated.getBounds();if(b.isValid())map.fitBounds(b,{padding:[15,15]})
+}
+function renderWorkerSummary(workers){
+  const box=$('routeGuide');if(!box)return;
+  box.innerHTML=`<h3>担当別エリア・独立巡回ルート</h3><div class="hint">町丁目を地理的に分割し、各担当が自分のエリア内だけを巡回します。担当を押すと地図で強調します。</div><div class="guide-list">${workers.map((f,i)=>{const p=f.properties,c=WORKER_COLORS[i%WORKER_COLORS.length];return `<button class="guide-item worker-preview" data-worker="${p.worker_id}"><div class="guide-num" style="background:${c}">${p.worker_id}</div><div><b>${escapeHtml(p.name||`担当${p.worker_id}`)} ・ ${(p.length_m/1000).toFixed(2)}km</b><span>${p.estimated_households?`推定 ${p.estimated_households}世帯 ・ `:''}約${p.estimated_minutes||'-'}分</span></div></button>`}).join('')}</div>`;
+  box.classList.remove('hidden');
+  box.querySelectorAll('.worker-preview').forEach(el=>el.onclick=()=>focusWorkerPreview(+el.dataset.worker));
+}
+function focusWorkerPreview(workerId){
+  if(state.layers.focus)state.layers.focus.remove();
+  const f=workerFeatures().find(x=>+x.properties.worker_id===workerId);if(!f)return;
+  const c=WORKER_COLORS[(workerId-1)%WORKER_COLORS.length];state.layers.focus=L.geoJSON(f,{style:{color:c,weight:10,opacity:1}}).addTo(map);
+  const b=state.layers.focus.getBounds();if(b.isValid())map.fitBounds(b,{padding:[60,60],maxZoom:18});
 }
 function clearRouteLayers(){['generated','todo','done','gps','directions','sequence','focus','nextPreview'].forEach(k=>{if(state.layers[k]){state.layers[k].remove();state.layers[k]=null}})}
 function bearingDeg(a,b){const p=Math.PI/180,y=Math.sin((b[0]-a[0])*p)*Math.cos(b[1]*p),x=Math.cos(a[1]*p)*Math.sin(b[1]*p)-Math.sin(a[1]*p)*Math.cos(b[1]*p)*Math.cos((b[0]-a[0])*p);return(Math.atan2(y,x)/p+360)%360}
@@ -146,7 +166,10 @@ $('joinProject').onclick=async()=>{const code=$('joinCode').value.trim().toUpper
 function prepareWorkerUI(){const features=workerFeatures();const options=features.map(f=>`<option value="${f.properties.worker_id}">${escapeHtml(f.properties.name||`担当${f.properties.worker_id}`)}</option>`).join('');$('fieldWorker').innerHTML=options;if(options)state.workerId=+($('fieldWorker').value||1)}
 $('fieldWorker').onchange=()=>loadWorker(+$('fieldWorker').value);
 function workerFeatures(){return (state.geojson?.features||[]).filter(f=>f.properties?.kind==='worker_route').sort((a,b)=>a.properties.worker_id-b.properties.worker_id)}
-function loadWorker(workerId){state.workerId=workerId;const feat=workerFeatures().find(f=>+f.properties.worker_id===workerId);if(!feat)return;const coords=feat.geometry.coordinates;state.segments=[];state.segmentLengths=[];for(let i=0;i<coords.length-1;i++){state.segments.push([coords[i],coords[i+1]]);state.segmentLengths.push(haversine(coords[i][1],coords[i][0],coords[i+1][1],coords[i+1][0]))}const key=progressKey();let saved=[];try{saved=JSON.parse(localStorage.getItem(key)||'[]')}catch{}state.completed=new Set(saved);state.fieldGuideLeg=0;state.lastPosition=null;$('fieldWorkerName').textContent=feat.properties.name||`担当${workerId}`;drawFieldRoute();updateFieldProgress();nextRouteInstruction();pullProgress()}
+function workerAreaFeatures(){return (state.geojson?.features||[]).filter(f=>f.properties?.kind==='worker_area').sort((a,b)=>a.properties.worker_id-b.properties.worker_id)}
+function workerNavigationLegFeatures(workerId){return (state.geojson?.features||[]).filter(f=>f.properties?.kind==='worker_navigation_leg'&&+f.properties.worker_id===+workerId).sort((a,b)=>(a.properties.leg||0)-(b.properties.leg||0))}
+const WORKER_COLORS=['#2563eb','#f97316','#16a34a','#a855f7','#e11d48','#0891b2','#ca8a04','#4f46e5'];
+function loadWorker(workerId){state.workerId=workerId;const feat=workerFeatures().find(f=>+f.properties.worker_id===workerId);if(!feat)return;state.navLegs=workerNavigationLegFeatures(workerId);const coords=feat.geometry.coordinates;state.segments=[];state.segmentLengths=[];for(let i=0;i<coords.length-1;i++){state.segments.push([coords[i],coords[i+1]]);state.segmentLengths.push(haversine(coords[i][1],coords[i][0],coords[i+1][1],coords[i+1][0]))}const key=progressKey();let saved=[];try{saved=JSON.parse(localStorage.getItem(key)||'[]')}catch{}state.completed=new Set(saved);state.fieldGuideLeg=0;state.lastPosition=null;$('fieldWorkerName').textContent=`${feat.properties.name||`担当${workerId}`}${feat.properties.estimated_households?` ・ 推定${feat.properties.estimated_households}世帯`:''}`;drawFieldRoute();updateFieldProgress();nextRouteInstruction();pullProgress()}
 function progressKey(){return `pn_progress_${state.projectId||'local'}_${state.workerId}`}
 function drawFieldRoute(){if(!state.areaGeojson&&state.geojson){const areaOnly={type:'FeatureCollection',features:(state.geojson.features||[]).filter(f=>f.properties?.kind==='area')};if(areaOnly.features.length){state.areaGeojson=areaOnly;renderAreaBoundaries(false)}}if(state.layers.generated){state.layers.generated.remove();state.layers.generated=null}if(state.layers.todo)state.layers.todo.remove();if(state.layers.done)state.layers.done.remove();if(state.layers.directions)state.layers.directions.remove();if(state.layers.sequence)state.layers.sequence.remove();const todo=[],done=[];state.segments.forEach((s,i)=>(state.completed.has(i)?done:todo).push({type:'Feature',properties:{segment:i},geometry:{type:'LineString',coordinates:s}}));state.layers.todo=L.geoJSON({type:'FeatureCollection',features:todo},{style:{color:'#ef4444',weight:7,opacity:.70}}).addTo(map);state.layers.done=L.geoJSON({type:'FeatureCollection',features:done},{style:{color:'#22c55e',weight:8,opacity:.95}}).addTo(map);drawNextWorkerArrow();const both=L.featureGroup([state.layers.todo,state.layers.done]);const b=both.getBounds();if(b.isValid())map.fitBounds(b,{padding:[20,20]})}
 function drawNextWorkerArrow(){if(state.layers.directions)state.layers.directions.remove();const g=L.layerGroup();let idx=state.segments.findIndex((_,i)=>!state.completed.has(i));if(idx<0){state.layers.directions=g.addTo(map);return}const s=state.segments[idx],a=s[0],b=s[1],pt=interpolateCoord(a,b,.5),deg=bearingDeg(a,b);L.geoJSON({type:'Feature',properties:{},geometry:{type:'LineString',coordinates:s}},{style:{color:'#2563eb',weight:10,opacity:1}}).addTo(g);L.marker([pt[1],pt[0]],{interactive:false,icon:L.divIcon({className:'route-arrow-wrap',html:`<div class="route-arrow field selected" style="transform:rotate(${deg}deg)">${arrowSvg()}</div>`,iconSize:[32,32],iconAnchor:[16,16]})}).addTo(g);state.layers.directions=g.addTo(map)}

@@ -40,7 +40,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.0.9 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.0.10 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -222,7 +222,7 @@ def _is_boundary_parallel(chunk: LineString, boundary_line, max_dist_m: float) -
 def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
     """Overpass道路を町丁目内の巡回可能な形状へ切り出す。
 
-    v1.0.9:
+    v1.0.10:
     - 境界道路を『探す』8m帯と、実際に『歩いてよい』1.5m帯を分離。
     - 通常道路は町丁目＋1.5mでクリップ。
     - 1.5〜8mの外側帯は境界と平行な道路だけ例外採用。

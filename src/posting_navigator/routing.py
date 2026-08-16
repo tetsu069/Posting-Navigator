@@ -467,3 +467,157 @@ def split_route(route: dict, workers: int) -> list[dict]:
     for assignment in assignments:
         assignment["difference_from_average_m"] = round(assignment["length_m"] - average, 1)
     return assignments
+
+# --- v1.0.10: geographic worker-area partitioning ---
+from shapely.geometry import box as _box
+
+
+def _road_length_m(road: dict) -> float:
+    coords = list(road["geometry"].coords)
+    return sum(_dist_m(a, b) for a, b in zip(coords, coords[1:]))
+
+
+def _clip_roads_to_polygon(roads: list[dict], polygon, *, min_length_m: float = 1.0) -> list[dict]:
+    """Clip road geometries to a worker polygon, avoiding shared out-of-area branches."""
+    out: list[dict] = []
+    for road in roads:
+        inter = road["geometry"].intersection(polygon)
+        geoms = []
+        if inter.is_empty:
+            continue
+        if inter.geom_type == "LineString":
+            geoms = [inter]
+        elif inter.geom_type == "MultiLineString":
+            geoms = list(inter.geoms)
+        elif inter.geom_type == "GeometryCollection":
+            geoms = [g for g in inter.geoms if g.geom_type == "LineString"]
+        for geom in geoms:
+            r = dict(road)
+            r["geometry"] = geom
+            if _road_length_m(r) >= min_length_m:
+                out.append(r)
+    return out
+
+
+def _weighted_split_threshold(roads: list[dict], axis: int, target_fraction: float) -> float:
+    items = []
+    for road in roads:
+        p = road["geometry"].interpolate(0.5, normalized=True)
+        coord = p.x if axis == 0 else p.y
+        items.append((coord, max(_road_length_m(road), 0.1)))
+    items.sort(key=lambda x: x[0])
+    total = sum(w for _, w in items) or 1.0
+    target = total * target_fraction
+    acc = 0.0
+    for coord, w in items:
+        acc += w
+        if acc >= target:
+            return coord
+    return items[-1][0]
+
+
+def _split_partition(polygon, roads: list[dict], left_count: int, total_count: int):
+    minx, miny, maxx, maxy = polygon.bounds
+    xs = [r["geometry"].interpolate(0.5, normalized=True).x for r in roads]
+    ys = [r["geometry"].interpolate(0.5, normalized=True).y for r in roads]
+    xspread = (max(xs) - min(xs)) if xs else (maxx - minx)
+    yspread = (max(ys) - min(ys)) if ys else (maxy - miny)
+    axis = 0 if xspread >= yspread else 1
+    frac = left_count / total_count
+    threshold = _weighted_split_threshold(roads, axis, frac)
+    pad = max(maxx - minx, maxy - miny, 1e-6) * 2 + 1e-5
+    if axis == 0:
+        left_shape = polygon.intersection(_box(minx-pad, miny-pad, threshold, maxy+pad))
+        right_shape = polygon.intersection(_box(threshold, miny-pad, maxx+pad, maxy+pad))
+    else:
+        left_shape = polygon.intersection(_box(minx-pad, miny-pad, maxx+pad, threshold))
+        right_shape = polygon.intersection(_box(minx-pad, threshold, maxx+pad, maxy+pad))
+    left_roads = _clip_roads_to_polygon(roads, left_shape)
+    right_roads = _clip_roads_to_polygon(roads, right_shape)
+    # Defensive fallback for pathological split values.
+    if not left_roads or not right_roads:
+        threshold = ((minx + maxx) / 2) if axis == 0 else ((miny + maxy) / 2)
+        if axis == 0:
+            left_shape = polygon.intersection(_box(minx-pad, miny-pad, threshold, maxy+pad))
+            right_shape = polygon.intersection(_box(threshold, miny-pad, maxx+pad, maxy+pad))
+        else:
+            left_shape = polygon.intersection(_box(minx-pad, miny-pad, maxx+pad, threshold))
+            right_shape = polygon.intersection(_box(minx-pad, threshold, maxx+pad, maxy+pad))
+        left_roads = _clip_roads_to_polygon(roads, left_shape)
+        right_roads = _clip_roads_to_polygon(roads, right_shape)
+    return left_shape, left_roads, right_shape, right_roads
+
+
+def partition_worker_areas(boundary, roads: list[dict], workers: int) -> list[dict]:
+    """Split one town polygon into geographically contiguous worker areas.
+
+    The split target is candidate-road workload, not a simple slice of the finished route.
+    This keeps each worker in a compact, contiguous part of the town.
+    """
+    if workers < 1:
+        raise ValueError("担当者数は1以上で指定してください")
+    if workers == 1:
+        return [{"worker_id": 1, "polygon": boundary, "roads": roads}]
+
+    def rec(poly, rs, count):
+        if count <= 1:
+            return [(poly, rs)]
+        a = count // 2
+        b = count - a
+        lp, lr, rp, rr = _split_partition(poly, rs, a, count)
+        return rec(lp, lr, a) + rec(rp, rr, b)
+
+    raw = rec(boundary, roads, workers)
+    out = []
+    for i, (poly, rs) in enumerate(raw, start=1):
+        if poly.is_empty or not rs:
+            raise ValueError(f"担当{i:02d}のエリア分割に失敗しました")
+        out.append({"worker_id": i, "polygon": poly, "roads": rs})
+    return out
+
+
+def generate_worker_routes(boundary, roads: list[dict], workers: int,
+                           start_point: tuple[float, float] | None = None,
+                           households: int | None = None) -> list[dict]:
+    """Generate an independent Chinese-Postman route for each geographic worker area."""
+    parts = partition_worker_areas(boundary, roads, workers)
+    assignments = []
+    total_source = 0.0
+    generated = []
+    for part in parts:
+        wr = generate_route(part["roads"], start_point=start_point)
+        total_source += float(wr.get("source_length_m", 0))
+        generated.append((part, wr))
+    for part, wr in generated:
+        share = (float(wr.get("source_length_m", 0)) / total_source) if total_source else 1 / workers
+        est_households = round(households * share) if households else None
+        a = {
+            "worker_id": part["worker_id"],
+            "name": f"担当{part['worker_id']:02d}",
+            "geometry": wr["geometry"],
+            "worker_area": part["polygon"],
+            "start_point": wr["start_point"],
+            "end_point": Point(list(wr["geometry"].coords)[-1]),
+            "start_lon": wr["start_point"].x,
+            "start_lat": wr["start_point"].y,
+            "end_lon": list(wr["geometry"].coords)[-1][0],
+            "end_lat": list(wr["geometry"].coords)[-1][1],
+            "length_m": float(wr["route_length_m"]),
+            "source_length_m": float(wr["source_length_m"]),
+            "duplication_ratio": wr.get("duplication_ratio"),
+            "component_count": wr.get("component_count", 1),
+            "estimated_households": est_households,
+            "route_steps": wr.get("route_steps", []),
+            "navigation_legs": wr.get("navigation_legs", []),
+        }
+        generated_len = float(wr["route_length_m"])
+        a["estimated_minutes"] = round(generated_len / 75.0)  # brisk posting walk proxy
+        assignments.append(a)
+    avg = sum(a["length_m"] for a in assignments) / len(assignments) if assignments else 0.0
+    for a in assignments:
+        a["difference_from_average_m"] = round(a["length_m"] - avg, 1)
+    # Keep household totals exact after rounding by correcting the last worker.
+    if households and assignments:
+        delta = int(households) - sum(int(a.get("estimated_households") or 0) for a in assignments)
+        assignments[-1]["estimated_households"] = int(assignments[-1].get("estimated_households") or 0) + delta
+    return assignments
