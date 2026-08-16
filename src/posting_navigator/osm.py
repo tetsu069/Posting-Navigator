@@ -35,7 +35,7 @@ def overpass_query(poly: Polygon) -> str:
     minx, miny, maxx, maxy = poly.bounds
     # Include a small halo outside the town polygon.  Some in-area streets are
     # connected only by a junction whose centreline sits a few metres over the
-    # administrative boundary.  v1.0.17 keeps that halo as transfer-only roads.
+    # administrative boundary.  v1.0.18 keeps that halo as transfer-only roads.
     query_buffer_m = float(os.getenv("OVERPASS_CONTEXT_BUFFER_M", "35"))
     lat0 = (miny + maxy) * 0.5
     dlat = query_buffer_m / 111_320.0
@@ -61,7 +61,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.0.17 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.0.18 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -489,7 +489,7 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
 def osm_json_to_mobility_lines(data: dict, boundary: Polygon) -> list[dict]:
     """Return the walking-connector road layer for routing transfers.
 
-    v1.0.17 separates *where we distribute* from *where we are allowed to walk*.
+    v1.0.18 separates *where we distribute* from *where we are allowed to walk*.
     This layer keeps traversable OSM highways inside the town plus a small
     boundary halo (20 m by default), including parks/footways and short outward
     boundary stubs.  Every returned edge is connector-only; the strict posting

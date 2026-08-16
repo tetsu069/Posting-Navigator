@@ -184,7 +184,110 @@ def _simplify_degree_two(graph: nx.MultiGraph) -> nx.MultiGraph:
     return g
 
 
-def build_graph(roads: list[dict], *, simplify: bool = True) -> nx.MultiGraph:
+
+def _snap_graph_nodes(graph: nx.MultiGraph, tolerance_m: float = 1.25) -> nx.MultiGraph:
+    """Merge near-identical road endpoints without inventing transfer lines.
+
+    OSM ways, administrative clipping and floating-point transforms can leave
+    endpoints that represent the same junction a few decimetres apart.  Older
+    versions required exact coordinate equality, splitting one real road
+    network into false components.  We cluster only very close nodes and move
+    the *endpoint coordinate* of the existing road geometry to the cluster
+    representative; no standalone straight connector edge is created.
+    """
+    if tolerance_m <= 0 or graph.number_of_nodes() < 2:
+        return graph
+    # ~metre grid in lon/lat. Neighbouring cells are checked with _dist_m.
+    mean_lat = sum(n[1] for n in graph.nodes) / max(1, graph.number_of_nodes())
+    cell_lat = tolerance_m / 111_320.0
+    cell_lon = tolerance_m / max(1.0, 111_320.0 * math.cos(math.radians(mean_lat)))
+    buckets: dict[tuple[int, int], list[tuple[float, float]]] = {}
+    mapping: dict[tuple[float, float], tuple[float, float]] = {}
+    for node in sorted(graph.nodes, key=lambda n: (n[1], n[0])):
+        ix = int(math.floor(node[0] / cell_lon)); iy = int(math.floor(node[1] / cell_lat))
+        candidates = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                candidates.extend(buckets.get((ix+dx, iy+dy), []))
+        near = [r for r in candidates if _dist_m(node, r) <= tolerance_m]
+        rep = min(near, key=lambda r: _dist_m(node, r)) if near else node
+        mapping[node] = rep
+        if rep == node:
+            buckets.setdefault((ix, iy), []).append(rep)
+    if all(k == v for k, v in mapping.items()):
+        return graph
+    out = nx.MultiGraph()
+    for u, v, data in graph.edges(data=True):
+        nu, nv = mapping[u], mapping[v]
+        if nu == nv:
+            continue
+        d = dict(data)
+        geom = d.get('geometry')
+        if geom is not None and not geom.is_empty:
+            coords = _orient_coords(geom.coords, u, v)
+            coords[0] = nu; coords[-1] = nv
+            d['geometry'] = LineString(coords)
+            d['length'] = sum(_dist_m(a,b) for a,b in zip(coords, coords[1:]))
+            # Preserve penalty ratio when possible.
+            old_len = float(data.get('length', 0) or 0)
+            old_cost = float(data.get('route_cost', d['length']) or d['length'])
+            factor = old_cost / old_len if old_len > 0 else 1.0
+            d['route_cost'] = d['length'] * factor
+        out.add_edge(nu, nv, **d)
+    return out
+
+
+
+def _mark_posting_targets(shared_graph: nx.MultiGraph, target_roads: list[dict], tolerance_m: float = 0.9) -> None:
+    """Classify shared-network edges against the actual distribution geometries.
+
+    Connector roads can carry stale/default posting_target metadata, and worker
+    polygons often clip a target road while the connector layer retains the
+    full original way.  Therefore target membership must be derived spatially
+    *after* the common graph is noded, not copied from connector metadata.
+    """
+    geoms = [r['geometry'] for r in target_roads if r.get('geometry') is not None and not r['geometry'].is_empty]
+    if not geoms:
+        return
+    tree = STRtree(geoms)
+    # convert metres to a conservative degree tolerance for the point-distance
+    # check; actual _dist_m is used on nearest points only if needed.
+    deg_tol = tolerance_m / 100_000.0
+    for u, v, data in shared_graph.edges(data=True):
+        geom = data.get('geometry')
+        if geom is None or geom.is_empty:
+            data['posting_target'] = False
+            continue
+        mid = geom.interpolate(0.5, normalized=True)
+        idx = tree.query_nearest(mid)
+        if hasattr(idx, 'shape') and getattr(idx, 'size', 0):
+            j = int(idx.flat[0])
+        elif hasattr(idx, '__len__'):
+            j = int(idx[0]) if len(idx) else -1
+        else:
+            j = int(idx)
+        if j < 0:
+            data['posting_target'] = False
+            continue
+        nearest = geoms[j]
+        # Shapely works in degrees here.  At Tokyo this threshold is under 1 m
+        # and only classifies an edge as target when it lies on the target way.
+        data['posting_target'] = bool(nearest.distance(mid) <= deg_tol)
+        if data['posting_target']:
+            data['connector_only'] = False
+
+def _posting_subgraph(shared_graph: nx.MultiGraph) -> nx.MultiGraph:
+    """Extract distribution edges from the already-noded shared road graph."""
+    g = nx.MultiGraph()
+    for u, v, data in shared_graph.edges(data=True):
+        if not data.get('posting_target', True):
+            continue
+        g.add_edge(u, v, **dict(data))
+    if g.number_of_edges() == 0:
+        raise ValueError('住宅・配布対象道路がありません')
+    return _simplify_degree_two(g)
+
+def build_graph(roads: list[dict], *, simplify: bool = True, snap_tolerance_m: float = 0.0) -> nx.MultiGraph:
     """道路を実交差点でnode化し、全連結成分を保持したMultiGraphへ変換する。"""
     if not roads:
         raise ValueError("道路データが空です")
@@ -236,6 +339,8 @@ def build_graph(roads: list[dict], *, simplify: bool = True) -> nx.MultiGraph:
             )
     if graph.number_of_edges() == 0:
         raise ValueError("道路グラフが空です")
+    if snap_tolerance_m > 0:
+        graph = _snap_graph_nodes(graph, snap_tolerance_m)
     return _simplify_degree_two(graph) if simplify else graph
 
 def _nearest_node(g: nx.MultiGraph, point: tuple[float, float] | None) -> tuple[float, float]:
@@ -488,7 +593,14 @@ def _connector_path_steps(connector_graph: nx.MultiGraph, start, goal, *, seq_st
     try:
         path = nx.shortest_path(connector_graph, start, goal, weight="route_cost")
     except (nx.NetworkXNoPath, nx.NodeNotFound) as exc:
-        raise ValueError("巡回区間同士を実道路上で接続できません。道路データの接続状態を確認してください") from exc
+        try:
+            ca = nx.node_connected_component(connector_graph, start) if start in connector_graph else set()
+            cb = nx.node_connected_component(connector_graph, goal) if goal in connector_graph else set()
+            gap = min((_dist_m(a, b) for a in ca for b in cb), default=math.inf)
+            detail = f"（接続成分間の最短ギャップ約{gap:.1f}m）" if math.isfinite(gap) else ""
+        except Exception:
+            detail = ""
+        raise ValueError("巡回区間同士を実道路上で接続できません" + detail + "。OSM道路の接続状態を確認してください") from exc
     out: list[dict] = []
     seq = seq_start
     for a, b in zip(path, path[1:]):
@@ -514,14 +626,16 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
     target_roads = [r for r in roads if r.get("posting_target", True)]
     if not target_roads:
         raise ValueError("住宅・配布対象道路がありません")
-    source_graph = build_graph(target_roads)
+
+    # v1.0.18: 配布網と移動網を別々にnode化しない。
+    # 同じ道路集合を一度だけnode化し、その上でposting_target edgeを抽出することで、
+    # クリップ端点や交差点の座標差による「偽の非連結」を防ぐ。
+    connector_source = _dedupe_roads_by_geometry(list(connector_roads or roads) + list(target_roads))
+    connector_graph = build_graph(connector_source, simplify=False, snap_tolerance_m=1.25)
+    _mark_posting_targets(connector_graph, target_roads)
+    source_graph = _posting_subgraph(connector_graph)
     component_sets = _component_order(source_graph, start_point)
     source_length = sum(d["length"] for _, _, d in source_graph.edges(data=True))
-
-    # 担当エリアで道路をクリップすると、分割境界でグラフが分断されることがある。
-    # 町丁目全体の道路＋担当道路を一緒にnode化することで、クリップ端点もconnector graphのnodeになる。
-    connector_source = _dedupe_roads_by_geometry(list(connector_roads or roads) + list(target_roads))
-    connector_graph = build_graph(connector_source, simplify=False)
 
     steps: list[dict] = []
     duplicated_length = 0.0
