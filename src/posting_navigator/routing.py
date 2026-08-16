@@ -185,6 +185,129 @@ def _simplify_degree_two(graph: nx.MultiGraph) -> nx.MultiGraph:
 
 
 
+
+def _edge_axis_angle_deg(graph: nx.MultiGraph, node: tuple[float, float]) -> list[float]:
+    """Return local road-axis bearings (0-180 deg) for edges incident to node."""
+    out: list[float] = []
+    for _, other, data in graph.edges(node, data=True):
+        geom = data.get("geometry")
+        if geom is not None and not geom.is_empty:
+            coords = _orient_coords(geom.coords, node, other)
+            # Use a point a few metres into the edge when possible so tiny
+            # coordinate noise at the endpoint does not dominate the bearing.
+            target = coords[-1]
+            for c in coords[1:]:
+                if _dist_m(node, c) >= 3.0:
+                    target = c
+                    break
+        else:
+            target = other
+        dx = (target[0] - node[0]) * math.cos(math.radians((target[1] + node[1]) * 0.5))
+        dy = target[1] - node[1]
+        if abs(dx) + abs(dy) < 1e-15:
+            continue
+        bearing = math.degrees(math.atan2(dx, dy)) % 180.0
+        out.append(bearing)
+    return out
+
+
+def _axis_diff_deg(a: float, b: float) -> float:
+    d = abs(a - b) % 180.0
+    return min(d, 180.0 - d)
+
+
+def _safe_snap_pair(graph: nx.MultiGraph, a: tuple[float, float], b: tuple[float, float], max_gap_m: float) -> bool:
+    """Decide whether a 1.25-3m gap is a likely broken junction, not parallel roads."""
+    gap = _dist_m(a, b)
+    if gap <= 1.25 or gap > max_gap_m:
+        return gap <= 1.25
+    # Rescue snapping is intentionally limited to dangling/near-dangling nodes.
+    # This prevents nearby mid-block vertices on parallel streets from merging.
+    if graph.degree(a) > 2 or graph.degree(b) > 2:
+        return False
+    aa = _edge_axis_angle_deg(graph, a)
+    bb = _edge_axis_angle_deg(graph, b)
+    if not aa or not bb:
+        return False
+    dx = (b[0] - a[0]) * math.cos(math.radians((a[1] + b[1]) * 0.5))
+    dy = b[1] - a[1]
+    gap_axis = math.degrees(math.atan2(dx, dy)) % 180.0
+    a_align = min(_axis_diff_deg(x, gap_axis) for x in aa)
+    b_align = min(_axis_diff_deg(x, gap_axis) for x in bb)
+    cross = min(_axis_diff_deg(x, y) for x in aa for y in bb)
+    # Normal broken continuation: at least one road points toward the gap.
+    # Perpendicular junctions can also be rescued when the two road axes are
+    # clearly different.  Two side-by-side parallel roads are rejected.
+    if min(a_align, b_align) <= 40.0:
+        return True
+    if cross >= 35.0 and min(a_align, b_align) <= 70.0:
+        return True
+    return False
+
+
+def _merge_node_pair(graph: nx.MultiGraph, keep: tuple[float, float], drop: tuple[float, float]) -> nx.MultiGraph:
+    """Merge one endpoint into another while keeping every edge on its road geometry."""
+    mapping = {n: (keep if n == drop else n) for n in graph.nodes}
+    out = nx.MultiGraph()
+    for u, v, data in graph.edges(data=True):
+        nu, nv = mapping[u], mapping[v]
+        if nu == nv:
+            continue
+        d = dict(data)
+        geom = d.get('geometry')
+        if geom is not None and not geom.is_empty:
+            coords = _orient_coords(geom.coords, u, v)
+            coords[0] = nu; coords[-1] = nv
+            d['geometry'] = LineString(coords)
+            d['length'] = sum(_dist_m(x, y) for x, y in zip(coords, coords[1:]))
+            old_len = float(data.get('length', 0) or 0)
+            old_cost = float(data.get('route_cost', d['length']) or d['length'])
+            factor = old_cost / old_len if old_len > 0 else 1.0
+            d['route_cost'] = d['length'] * factor
+        out.add_edge(nu, nv, **d)
+    return out
+
+
+def _conditional_snap_components(graph: nx.MultiGraph, max_gap_m: float = 3.0) -> nx.MultiGraph:
+    """Heal small false component gaps using endpoint/direction checks.
+
+    v1.0.19 keeps the strict 1.25m snap first, then permits a wider rescue snap
+    only between *different* connected components and only when local road
+    directions look like one junction.  No connector edge is invented.
+    """
+    if max_gap_m <= 1.25 or graph.number_of_nodes() < 2:
+        return graph
+    g = graph
+    while True:
+        comps = [set(c) for c in nx.connected_components(g)]
+        if len(comps) <= 1:
+            return g
+        node_comp = {n: i for i, c in enumerate(comps) for n in c}
+        candidates = [n for n in g.nodes if g.degree(n) <= 2]
+        mean_lat = sum(n[1] for n in candidates) / max(1, len(candidates))
+        cell_lat = max_gap_m / 111_320.0
+        cell_lon = max_gap_m / max(1.0, 111_320.0 * math.cos(math.radians(mean_lat)))
+        buckets: dict[tuple[int, int], list[tuple[float, float]]] = {}
+        best = None
+        for a in candidates:
+            ix = int(math.floor(a[0] / cell_lon)); iy = int(math.floor(a[1] / cell_lat))
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for b in buckets.get((ix+dx, iy+dy), []):
+                        if node_comp[a] == node_comp[b]:
+                            continue
+                        gap = _dist_m(a, b)
+                        if gap <= max_gap_m and _safe_snap_pair(g, a, b, max_gap_m):
+                            if best is None or gap < best[0]:
+                                best = (gap, a, b)
+            buckets.setdefault((ix, iy), []).append(a)
+        if best is None:
+            return g
+        _, a, b = best
+        # Keep the lexicographically stable point so reruns are deterministic.
+        keep, drop = (a, b) if a <= b else (b, a)
+        g = _merge_node_pair(g, keep, drop)
+
 def _snap_graph_nodes(graph: nx.MultiGraph, tolerance_m: float = 1.25) -> nx.MultiGraph:
     """Merge near-identical road endpoints without inventing transfer lines.
 
@@ -632,6 +755,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
     # クリップ端点や交差点の座標差による「偽の非連結」を防ぐ。
     connector_source = _dedupe_roads_by_geometry(list(connector_roads or roads) + list(target_roads))
     connector_graph = build_graph(connector_source, simplify=False, snap_tolerance_m=1.25)
+    connector_graph = _conditional_snap_components(connector_graph, max_gap_m=3.0)
     _mark_posting_targets(connector_graph, target_roads)
     source_graph = _posting_subgraph(connector_graph)
     component_sets = _component_order(source_graph, start_point)
