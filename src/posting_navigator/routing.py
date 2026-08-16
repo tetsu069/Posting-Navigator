@@ -245,68 +245,105 @@ def _safe_snap_pair(graph: nx.MultiGraph, a: tuple[float, float], b: tuple[float
     return False
 
 
-def _merge_node_pair(graph: nx.MultiGraph, keep: tuple[float, float], drop: tuple[float, float]) -> nx.MultiGraph:
-    """Merge one endpoint into another while keeping every edge on its road geometry."""
-    mapping = {n: (keep if n == drop else n) for n in graph.nodes}
+def _rebuild_graph_with_mapping(graph: nx.MultiGraph, mapping: dict[tuple[float, float], tuple[float, float]]) -> nx.MultiGraph:
+    """Rebuild a road graph once after deciding all endpoint snaps.
+
+    v1.0.20 deliberately separates *decision* from *mutation*.  Older rescue
+    snapping repeatedly rebuilt the whole MultiGraph after each accepted pair,
+    which caused very high temporary memory use on Render Free.  Here every
+    accepted endpoint pair is collected first and the graph is reconstructed a
+    single time.
+    """
+    if not mapping or all(mapping.get(n, n) == n for n in graph.nodes):
+        return graph
     out = nx.MultiGraph()
     for u, v, data in graph.edges(data=True):
-        nu, nv = mapping[u], mapping[v]
+        nu = mapping.get(u, u)
+        nv = mapping.get(v, v)
         if nu == nv:
             continue
         d = dict(data)
-        geom = d.get('geometry')
-        if geom is not None and not geom.is_empty:
-            coords = _orient_coords(geom.coords, u, v)
-            coords[0] = nu; coords[-1] = nv
-            d['geometry'] = LineString(coords)
-            d['length'] = sum(_dist_m(x, y) for x, y in zip(coords, coords[1:]))
-            old_len = float(data.get('length', 0) or 0)
-            old_cost = float(data.get('route_cost', d['length']) or d['length'])
-            factor = old_cost / old_len if old_len > 0 else 1.0
-            d['route_cost'] = d['length'] * factor
+        geom = d.get("geometry")
+        if geom is not None:
+            try:
+                coords = _orient_coords(geom.coords, u, v)
+            except Exception:
+                coords = [u, v]
+            if len(coords) >= 2:
+                coords[0] = nu
+                coords[-1] = nv
+                d["geometry"] = LineString(coords)
+                new_len = sum(_dist_m(a, b) for a, b in zip(coords, coords[1:]))
+                old_len = float(data.get("length", 0) or 0)
+                old_cost = float(data.get("route_cost", new_len) or new_len)
+                factor = old_cost / old_len if old_len > 0 else 1.0
+                d["length"] = new_len
+                d["route_cost"] = new_len * factor
         out.add_edge(nu, nv, **d)
     return out
 
 
 def _conditional_snap_components(graph: nx.MultiGraph, max_gap_m: float = 3.0) -> nx.MultiGraph:
-    """Heal small false component gaps using endpoint/direction checks.
+    """Low-memory one-pass rescue snapping for small false OSM junction gaps.
 
-    v1.0.19 keeps the strict 1.25m snap first, then permits a wider rescue snap
-    only between *different* connected components and only when local road
-    directions look like one junction.  No connector edge is invented.
+    Strict sub-1.25m snapping has already happened in ``build_graph``.  This
+    second pass considers only dangling / near-dangling nodes from *different*
+    original connected components and allows 1.25--3m rescue snaps when road
+    directions indicate the same junction.  Candidate pairs are chosen first,
+    then the graph is rebuilt once.  No straight connector edge is invented.
     """
     if max_gap_m <= 1.25 or graph.number_of_nodes() < 2:
         return graph
-    g = graph
-    while True:
-        comps = [set(c) for c in nx.connected_components(g)]
-        if len(comps) <= 1:
-            return g
-        node_comp = {n: i for i, c in enumerate(comps) for n in c}
-        candidates = [n for n in g.nodes if g.degree(n) <= 2]
-        mean_lat = sum(n[1] for n in candidates) / max(1, len(candidates))
-        cell_lat = max_gap_m / 111_320.0
-        cell_lon = max_gap_m / max(1.0, 111_320.0 * math.cos(math.radians(mean_lat)))
-        buckets: dict[tuple[int, int], list[tuple[float, float]]] = {}
-        best = None
-        for a in candidates:
-            ix = int(math.floor(a[0] / cell_lon)); iy = int(math.floor(a[1] / cell_lat))
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    for b in buckets.get((ix+dx, iy+dy), []):
-                        if node_comp[a] == node_comp[b]:
-                            continue
-                        gap = _dist_m(a, b)
-                        if gap <= max_gap_m and _safe_snap_pair(g, a, b, max_gap_m):
-                            if best is None or gap < best[0]:
-                                best = (gap, a, b)
-            buckets.setdefault((ix, iy), []).append(a)
-        if best is None:
-            return g
-        _, a, b = best
-        # Keep the lexicographically stable point so reruns are deterministic.
+
+    comps = [set(c) for c in nx.connected_components(graph)]
+    if len(comps) <= 1:
+        return graph
+    node_comp = {n: i for i, c in enumerate(comps) for n in c}
+    candidates = [n for n in graph.nodes if graph.degree(n) <= 2]
+    if len(candidates) < 2:
+        return graph
+
+    mean_lat = sum(n[1] for n in candidates) / len(candidates)
+    cell_lat = max_gap_m / 111_320.0
+    cell_lon = max_gap_m / max(1.0, 111_320.0 * math.cos(math.radians(mean_lat)))
+
+    buckets: dict[tuple[int, int], list[tuple[float, float]]] = {}
+    possible: list[tuple[float, tuple[float, float], tuple[float, float]]] = []
+    for a in candidates:
+        ix = int(math.floor(a[0] / cell_lon))
+        iy = int(math.floor(a[1] / cell_lat))
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for b in buckets.get((ix + dx, iy + dy), ()):
+                    if node_comp[a] == node_comp[b]:
+                        continue
+                    gap = _dist_m(a, b)
+                    if 1.25 < gap <= max_gap_m and _safe_snap_pair(graph, a, b, max_gap_m):
+                        possible.append((gap, a, b))
+        buckets.setdefault((ix, iy), []).append(a)
+
+    if not possible:
+        return graph
+
+    # Greedy shortest-first matching.  Each endpoint participates in at most one
+    # rescue snap, preventing a dense cluster of parallel/nearby endpoints from
+    # collapsing into a single artificial junction.
+    possible.sort(key=lambda x: x[0])
+    used: set[tuple[float, float]] = set()
+    mapping: dict[tuple[float, float], tuple[float, float]] = {}
+    accepted = 0
+    for _, a, b in possible:
+        if a in used or b in used:
+            continue
         keep, drop = (a, b) if a <= b else (b, a)
-        g = _merge_node_pair(g, keep, drop)
+        mapping[drop] = keep
+        used.add(a)
+        used.add(b)
+        accepted += 1
+
+    if not accepted:
+        return graph
+    return _rebuild_graph_with_mapping(graph, mapping)
 
 def _snap_graph_nodes(graph: nx.MultiGraph, tolerance_m: float = 1.25) -> nx.MultiGraph:
     """Merge near-identical road endpoints without inventing transfer lines.

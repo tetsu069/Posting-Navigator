@@ -10,7 +10,7 @@ def test_health_and_config(tmp_path, monkeypatch):
     monkeypatch.setenv('POSTING_NAV_DB', str(tmp_path / 'test.db'))
     from posting_navigator.webapp import app
     c = app.test_client()
-    assert c.get('/api/health').get_json()['version'] == '1.0.19'
+    assert c.get('/api/health').get_json()['version'] == '1.0.20'
     cfg = c.get('/api/config').get_json()
     assert cfg['gps_threshold_m'] > 0
 
