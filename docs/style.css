@@ -29,3 +29,14 @@
 .guide-controller{display:grid;grid-template-columns:86px 1fr 86px;gap:8px;align-items:center;margin:10px 0}.guide-controller button{margin:0;padding:8px}.guide-controller>div{text-align:center}.guide-controller strong{font-size:14px;color:#1d4ed8}.guide-current{display:flex;flex-direction:column;margin-top:3px}.guide-current b{font-size:13px}.guide-current span{font-size:11px;color:#64748b}
 .guide-list{max-height:390px}.guide-item{width:100%;margin:0;text-align:left;color:#0f172a;background:#fff;font-weight:400;cursor:pointer}.guide-item:hover{background:#f8fbff}.guide-item.active{border:2px solid #2563eb;background:#eff6ff;box-shadow:0 0 0 2px rgba(37,99,235,.08)}.guide-item.active .guide-num{background:#1d4ed8}.guide-item span{display:block;margin-top:2px}
 @media(max-width:900px){.guide-controller{grid-template-columns:72px 1fr 72px}.guide-list{max-height:300px}}
+
+/* v1.0.7 desktop: 地図を固定し、左サイドカラムだけスクロール */
+@media(min-width:901px){
+  html,body{height:100%;overflow:hidden}
+  .app-shell{height:100vh;max-width:1440px;display:flex;flex-direction:column;overflow:hidden}
+  .topbar{flex:0 0 auto}
+  .layout{flex:1 1 auto;min-height:0;height:0}
+  .controls{height:100%;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+  .map-panel{height:100%;min-height:0;overflow:hidden}
+  #map{height:100%;min-height:0}
+}

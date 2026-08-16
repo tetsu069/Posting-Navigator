@@ -218,48 +218,61 @@ def _turn_label(prev_bearing: float | None, new_bearing: float) -> str:
     if prev_bearing is None:
         return "開始"
     diff = ((new_bearing - prev_bearing + 540) % 360) - 180
-    if abs(diff) >= 150:
+    if abs(diff) >= 155:
         return "折り返し"
-    if diff >= 35:
+    if diff >= 42:
         return "右折"
-    if diff <= -35:
+    if diff <= -42:
         return "左折"
     return "直進"
 
 
-def build_navigation_legs(steps: list[dict]) -> list[dict]:
-    """細かい巡回edgeを、地図で理解できるナビ区間へまとめる。"""
-    legs = []
+def _bearing_over_distance(coords: list[tuple[float, float]], *, from_start: bool, sample_m: float = 10.0) -> float:
+    """交差点直近の1m級ノードに引っ張られないよう、道路に沿って数m先との方位を使う。"""
+    if len(coords) < 2:
+        return 0.0
+    seq = coords if from_start else list(reversed(coords))
+    origin = seq[0]
+    acc = 0.0
+    prev = origin
+    for pt in seq[1:]:
+        seg = _dist_m(prev, pt)
+        acc += seg
+        if acc >= sample_m:
+            b = _bearing(origin, pt)
+            return b if from_start else (b + 180) % 360
+        prev = pt
+    b = _bearing(seq[0], seq[-1])
+    return b if from_start else (b + 180) % 360
+
+
+def _raw_navigation_legs(steps: list[dict]) -> list[dict]:
+    legs: list[dict] = []
     current = None
     for step in steps:
         coords = list(step["geometry"].coords)
         if len(coords) < 2:
             continue
-        # 右左折判定は区間全体を結ぶ方位ではなく、道路形状の端部接線を使う。
-        # 曲線道路で「道路と違う方向」を示さないため。
-        bearing_start = _bearing(coords[0], coords[1])
-        bearing_end = _bearing(coords[-2], coords[-1])
+        b0 = _bearing_over_distance(coords, from_start=True)
+        b1 = _bearing_over_distance(coords, from_start=False)
         if current is None:
             current = {
                 "start_seq": step["seq"], "end_seq": step["seq"], "coords": coords[:],
                 "length_m": step["length_m"], "name": step.get("name", ""),
                 "transfer": step.get("transfer", False), "duplicated": step.get("duplicated", False),
-                "bearing_start": bearing_start, "bearing_end": bearing_end,
+                "bearing_start": b0, "bearing_end": b1,
             }
             continue
-        diff = abs(((bearing_start - current["bearing_end"] + 540) % 360) - 180)
+        diff = abs(((b0 - current["bearing_end"] + 540) % 360) - 180)
         same_kind = step.get("transfer", False) == current["transfer"] and step.get("duplicated", False) == current["duplicated"]
         same_name = bool(step.get("name")) and bool(current.get("name")) and step.get("name") == current.get("name")
-        # 連続している道路だけを結合する。非連続点をLineStringで直結すると
-        # 道路を無視した斜め線・誤った矢印が生まれるため絶対に結ばない。
         contiguous = _dist_m(current["coords"][-1], coords[0]) <= 1.5
-        # 同一道路、またはほぼ直進なら一つの案内区間としてまとめる。
-        can_merge = contiguous and same_kind and ((same_name and diff < 55) or diff < 22) and current["length_m"] < 260
+        can_merge = contiguous and same_kind and ((same_name and diff < 60) or diff < 25) and current["length_m"] < 280
         if can_merge:
             current["coords"].extend(coords[1:])
             current["end_seq"] = step["seq"]
             current["length_m"] += step["length_m"]
-            current["bearing_end"] = bearing_end
+            current["bearing_end"] = _bearing_over_distance(current["coords"], from_start=False)
             if not current.get("name"):
                 current["name"] = step.get("name", "")
         else:
@@ -268,13 +281,49 @@ def build_navigation_legs(steps: list[dict]) -> list[dict]:
                 "start_seq": step["seq"], "end_seq": step["seq"], "coords": coords[:],
                 "length_m": step["length_m"], "name": step.get("name", ""),
                 "transfer": step.get("transfer", False), "duplicated": step.get("duplicated", False),
-                "bearing_start": bearing_start, "bearing_end": bearing_end,
+                "bearing_start": b0, "bearing_end": b1,
             }
     if current is not None:
         legs.append(current)
+    return legs
+
+
+def _coalesce_micro_legs(legs: list[dict], threshold_m: float = 7.0) -> list[dict]:
+    """1〜数mの交差点ノイズを単独ナビにしない。実際の行き止まりtransferは保持する。"""
+    out: list[dict] = []
+    i = 0
+    while i < len(legs):
+        leg = legs[i]
+        if leg["length_m"] < threshold_m and not leg["transfer"]:
+            # 次区間へ吸収するのを優先。開始直後の「左折1m→折返し1m」を消す。
+            if i + 1 < len(legs) and not legs[i+1]["transfer"] and _dist_m(leg["coords"][-1], legs[i+1]["coords"][0]) <= 1.5:
+                nxt = dict(legs[i+1])
+                nxt["coords"] = leg["coords"] + nxt["coords"][1:]
+                nxt["start_seq"] = leg["start_seq"]
+                nxt["length_m"] += leg["length_m"]
+                nxt["bearing_start"] = _bearing_over_distance(nxt["coords"], from_start=True)
+                legs = legs[:i] + [nxt] + legs[i+2:]
+                continue
+            if out and not out[-1]["transfer"] and _dist_m(out[-1]["coords"][-1], leg["coords"][0]) <= 1.5:
+                out[-1]["coords"].extend(leg["coords"][1:])
+                out[-1]["end_seq"] = leg["end_seq"]
+                out[-1]["length_m"] += leg["length_m"]
+                out[-1]["bearing_end"] = _bearing_over_distance(out[-1]["coords"], from_start=False)
+                i += 1
+                continue
+        out.append(leg)
+        i += 1
+    return out
+
+
+def build_navigation_legs(steps: list[dict]) -> list[dict]:
+    """巡回edgeを、人が読める「交差点〜交差点」単位の案内へ変換する。"""
+    legs = _coalesce_micro_legs(_raw_navigation_legs(steps))
     prev = None
     result = []
     for i, leg in enumerate(legs, start=1):
+        leg["bearing_start"] = _bearing_over_distance(leg["coords"], from_start=True)
+        leg["bearing_end"] = _bearing_over_distance(leg["coords"], from_start=False)
         turn = _turn_label(prev, leg["bearing_start"])
         road = leg.get("name") or ("次の道路群へ移動" if leg["transfer"] else "この道路")
         instruction = f"{turn}：{road}を約{round(leg['length_m'])}m"

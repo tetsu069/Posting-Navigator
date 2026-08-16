@@ -37,7 +37,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.0.3 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.0.7 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -168,6 +168,11 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
         highway = tags.get("highway", "")
         if highway in EXCLUDED_HIGHWAYS:
             continue
+        # highway=* は細街路・歩道・service/path も含めて広く取得する。
+        # 明示的に通行不能なものだけ除外し、private は診断可能な属性として残す。
+        access = tags.get("access", "")
+        if access in {"no"} and highway not in {"pedestrian", "footway"}:
+            continue
         coords = [(p["lon"], p["lat"]) for p in element["geometry"]]
         if len(coords) < 2:
             continue
@@ -175,5 +180,9 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
         geoms = [clipped] if clipped.geom_type == "LineString" else list(getattr(clipped, "geoms", []))
         for geom in geoms:
             if geom.geom_type == "LineString" and len(geom.coords) >= 2 and geom.length > 1e-7:
-                roads.append({"id": element.get("id"), "highway": highway, "name": tags.get("name", ""), "geometry": geom})
+                roads.append({
+                    "id": element.get("id"), "highway": highway, "name": tags.get("name", ""),
+                    "access": tags.get("access", ""), "service": tags.get("service", ""),
+                    "foot": tags.get("foot", ""), "geometry": geom
+                })
     return roads
