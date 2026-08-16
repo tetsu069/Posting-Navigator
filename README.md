@@ -1,16 +1,19 @@
-# Posting Navigator v1.0.1
+# Posting Navigator v1.0.2
 
 町丁目KMZとOpenStreetMap道路からポスティング巡回ルートを生成し、現場ではスマホGPSで配布済み区間を自動記録するWeb/PWAです。GitHub Pagesを画面、RenderをPython APIとして利用できます。
 
 
-## v1.0.1 で追加・修正
+## v1.0.2 で追加・修正
 
-- KMZ読込直後から全町丁目の境界を地図に薄く表示
-- 選択中の町丁目を青い太線＋薄い塗りで強調
-- 境界上にマウスを置くと町丁目名を表示
-- 現場モードでも選択エリア境界を維持
-- 公開Web版ではOSM取得失敗時の確認用ダミーデータ利用を既定OFFに変更
-- `requirements.txt` を同梱し、Renderへの初回デプロイを簡略化
+- Overpass API リクエストに User-Agent / Referer / Accept を明示
+- `overpass.kumi.systems` を現行の `overpass.private.coffee` へ更新
+- private.coffee / overpass-api.de / VK Maps の3系統へ自動フェイルオーバー
+- 406時は text/plain POST へ互換リトライ
+- 429時は接続先をクールダウンし別ミラーへ自動切替
+- 壊れたOSMキャッシュを自動破棄して再取得
+- OSM取得失敗時は確認用ダミールートを既定で使用しない
+- GitHub Pages 公開用 Render API URLを `docs/config.js` に保持
+- v1.0.1の町丁目境界・薄色表示を維持
 
 ## v1.0で追加
 
