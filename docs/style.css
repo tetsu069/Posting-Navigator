@@ -21,3 +21,11 @@
 .route-end{padding:4px 7px;border-radius:999px;color:white;font-size:10px;font-weight:900;text-align:center;box-shadow:0 1px 5px rgba(15,23,42,.25)}.route-end.start{background:#16a34a}.route-end.goal{background:#0f172a}
 
 .route-guide{margin-top:12px;border:1px solid #dbeafe;background:#f8fbff;border-radius:12px;padding:10px}.route-guide h3{font-size:14px;margin:0 0 8px}.guide-list{display:grid;gap:6px;max-height:260px;overflow:auto}.guide-item{display:grid;grid-template-columns:28px 1fr;gap:8px;align-items:start;padding:7px 8px;background:#fff;border-radius:9px;border:1px solid #e2e8f0;font-size:12px}.guide-num{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#2563eb;color:#fff;font-weight:900}.guide-item b{display:block;font-size:13px}.guide-item span{color:#64748b}.next-guide{margin-top:10px;padding:12px;border-radius:12px;border:2px solid #2563eb;background:#eff6ff}.next-guide b{display:block;font-size:15px;color:#1d4ed8;margin-bottom:4px}.next-guide .turn{font-size:22px;font-weight:900;color:#0f172a}.route-leg-focus{stroke:#2563eb!important}
+
+
+/* v1.0.5: 明示的な開始地点設定・順番確認UI */
+.start-pick-mode{cursor:crosshair!important}.start-buttons button{margin-top:0}.start-buttons .active{background:#f59e0b;color:#fff}
+.route-arrow.selected svg{fill:#1d4ed8}.focus-seq .route-seq{border-color:#1d4ed8;color:#1e3a8a;background:#eff6ff}
+.guide-controller{display:grid;grid-template-columns:86px 1fr 86px;gap:8px;align-items:center;margin:10px 0}.guide-controller button{margin:0;padding:8px}.guide-controller>div{text-align:center}.guide-controller strong{font-size:14px;color:#1d4ed8}.guide-current{display:flex;flex-direction:column;margin-top:3px}.guide-current b{font-size:13px}.guide-current span{font-size:11px;color:#64748b}
+.guide-list{max-height:390px}.guide-item{width:100%;margin:0;text-align:left;color:#0f172a;background:#fff;font-weight:400;cursor:pointer}.guide-item:hover{background:#f8fbff}.guide-item.active{border:2px solid #2563eb;background:#eff6ff;box-shadow:0 0 0 2px rgba(37,99,235,.08)}.guide-item.active .guide-num{background:#1d4ed8}.guide-item span{display:block;margin-top:2px}
+@media(max-width:900px){.guide-controller{grid-template-columns:72px 1fr 72px}.guide-list{max-height:300px}}

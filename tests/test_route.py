@@ -64,3 +64,17 @@ def test_navigation_legs_follow_road_geometry():
     # route geometry should preserve intermediate OSM shape coordinates, not just graph-node chords.
     coords = list(route["geometry"].coords)
     assert any(abs(x-139.0005)<1e-6 and abs(y-35.0002)<1e-6 for x,y in coords)
+
+
+def test_navigation_legs_never_join_disconnected_geometry():
+    from shapely.geometry import LineString
+    from posting_navigator.routing import build_navigation_legs
+    steps = [
+        {"seq": 1, "geometry": LineString([(139.0,35.0),(139.001,35.0)]), "length_m": 91.0, "name": "A", "transfer": False, "duplicated": False},
+        # 同じ向き・同じ道路名でも、開始点が離れていれば別案内区間でなければならない。
+        {"seq": 2, "geometry": LineString([(139.01,35.0),(139.011,35.0)]), "length_m": 91.0, "name": "A", "transfer": False, "duplicated": False},
+    ]
+    legs = build_navigation_legs(steps)
+    assert len(legs) == 2
+    assert list(legs[0]["geometry"].coords)[-1] == (139.001,35.0)
+    assert list(legs[1]["geometry"].coords)[0] == (139.01,35.0)

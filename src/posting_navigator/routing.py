@@ -235,28 +235,31 @@ def build_navigation_legs(steps: list[dict]) -> list[dict]:
         coords = list(step["geometry"].coords)
         if len(coords) < 2:
             continue
-        step_bearing = _bearing(coords[0], coords[-1])
+        # 右左折判定は区間全体を結ぶ方位ではなく、道路形状の端部接線を使う。
+        # 曲線道路で「道路と違う方向」を示さないため。
+        bearing_start = _bearing(coords[0], coords[1])
+        bearing_end = _bearing(coords[-2], coords[-1])
         if current is None:
             current = {
                 "start_seq": step["seq"], "end_seq": step["seq"], "coords": coords[:],
                 "length_m": step["length_m"], "name": step.get("name", ""),
                 "transfer": step.get("transfer", False), "duplicated": step.get("duplicated", False),
-                "bearing_start": step_bearing, "bearing_end": step_bearing,
+                "bearing_start": bearing_start, "bearing_end": bearing_end,
             }
             continue
-        diff = abs(((step_bearing - current["bearing_end"] + 540) % 360) - 180)
+        diff = abs(((bearing_start - current["bearing_end"] + 540) % 360) - 180)
         same_kind = step.get("transfer", False) == current["transfer"] and step.get("duplicated", False) == current["duplicated"]
         same_name = bool(step.get("name")) and bool(current.get("name")) and step.get("name") == current.get("name")
+        # 連続している道路だけを結合する。非連続点をLineStringで直結すると
+        # 道路を無視した斜め線・誤った矢印が生まれるため絶対に結ばない。
+        contiguous = _dist_m(current["coords"][-1], coords[0]) <= 1.5
         # 同一道路、またはほぼ直進なら一つの案内区間としてまとめる。
-        can_merge = same_kind and (same_name and diff < 55 or diff < 22) and current["length_m"] < 260
+        can_merge = contiguous and same_kind and ((same_name and diff < 55) or diff < 22) and current["length_m"] < 260
         if can_merge:
-            if current["coords"][-1] == coords[0]:
-                current["coords"].extend(coords[1:])
-            else:
-                current["coords"].extend(coords)
+            current["coords"].extend(coords[1:])
             current["end_seq"] = step["seq"]
             current["length_m"] += step["length_m"]
-            current["bearing_end"] = step_bearing
+            current["bearing_end"] = bearing_end
             if not current.get("name"):
                 current["name"] = step.get("name", "")
         else:
@@ -265,7 +268,7 @@ def build_navigation_legs(steps: list[dict]) -> list[dict]:
                 "start_seq": step["seq"], "end_seq": step["seq"], "coords": coords[:],
                 "length_m": step["length_m"], "name": step.get("name", ""),
                 "transfer": step.get("transfer", False), "duplicated": step.get("duplicated", False),
-                "bearing_start": step_bearing, "bearing_end": step_bearing,
+                "bearing_start": bearing_start, "bearing_end": bearing_end,
             }
     if current is not None:
         legs.append(current)
