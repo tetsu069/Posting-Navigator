@@ -14,7 +14,7 @@
 <div class="app-shell">
   <header class="topbar">
     <div><h1>Posting Navigator</h1><p>ルート作成・GPS進捗・チーム共有</p></div>
-    <div class="top-actions"><span class="badge">v1.0.2</span><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
+    <div class="top-actions"><span class="badge">v1.0.3</span><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
   </header>
 
   <main class="layout">
@@ -42,6 +42,7 @@
         <button id="useCurrent" class="secondary">現在地を開始地点にする</button>
 
         <label class="check"><input id="fallback" type="checkbox"> OSM取得失敗時に確認用データを使用</label>
+        <div class="display-settings"><b>ルート表示</b><label class="check"><input id="showArrows" type="checkbox" checked> 進行方向の矢印を表示</label><label class="check"><input id="showNumbers" type="checkbox" checked> 巡回順の番号を表示</label><div class="hint">赤＝通常巡回、橙＝重複して通る区間、灰点線＝非連結道路への移動区間</div></div>
         <button id="build" disabled>巡回ルートを生成</button>
         <div id="status" class="status">KMZを選択してください。</div>
         <div id="metrics" class="metrics hidden"></div>

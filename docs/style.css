@@ -11,3 +11,11 @@
   font-weight:700;
   padding:3px 7px;
 }
+
+/* v1.0.3 巡回順序・進行方向 */
+.display-settings{margin-top:12px;padding:10px 12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px}.display-settings>b{font-size:13px}.display-settings .check{margin:7px 0 0;font-size:13px}
+.route-arrow-wrap,.route-seq-wrap,.route-end-wrap{background:transparent!important;border:0!important}
+.route-arrow{font-size:25px;line-height:24px;color:#b91c1c;font-weight:900;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;transform-origin:50% 50%}
+.route-arrow.transfer{color:#475569}.route-arrow.field{font-size:22px;color:#7f1d1d}
+.route-seq{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:white;border:3px solid #dc2626;color:#991b1b;font-size:11px;font-weight:900;box-shadow:0 1px 5px rgba(15,23,42,.25)}
+.route-end{padding:4px 7px;border-radius:999px;color:white;font-size:10px;font-weight:900;text-align:center;box-shadow:0 1px 5px rgba(15,23,42,.25)}.route-end.start{background:#16a34a}.route-end.goal{background:#0f172a}

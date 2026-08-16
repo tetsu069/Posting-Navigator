@@ -49,9 +49,40 @@ function renderAreaBoundaries(fitSelected=false){
 
 $('build').onclick=async()=>{status('status','道路取得・巡回計算・KML生成を実行中…');$('build').disabled=true;$('downloads').classList.add('hidden');try{const j=await api('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({upload_id:state.uploadId,area:$('area').value,workers:+$('workers').value,start_lat:$('lat').value,start_lon:$('lon').value,offline_fallback:$('fallback').checked})});state.jobId=j.job_id;state.geojson=j.geojson;state.summary=j.summary;renderGeneratedMap();renderMetrics();renderDownloads();status('status',`生成完了（道路データ: ${j.summary.data_mode}）`,'success');await createSharedProject();prepareWorkerUI();activateTab('field')}catch(e){status('status',e.message,'error')}finally{$('build').disabled=false}};
 
-function renderGeneratedMap(){clearRouteLayers();state.layers.generated=L.geoJSON(state.geojson,{style:f=>{const k=f.properties?.kind;if(k==='area')return state.areaGeojson?{weight:0,opacity:0,fillOpacity:0}:{weight:4,color:'#2563eb',opacity:.95,fillColor:'#3b82f6',fillOpacity:.14};if(k==='road')return{weight:1,color:'#94a3b8',opacity:.35};if(k==='worker_route')return{weight:5,color:'#ef4444',opacity:.75};if(k==='route')return{weight:3,color:'#f59e0b',opacity:.35};return{weight:2,color:'#64748b'}}}).addTo(map);const b=state.layers.generated.getBounds();if(b.isValid())map.fitBounds(b,{padding:[15,15]})}
-function clearRouteLayers(){['generated','todo','done','gps'].forEach(k=>{if(state.layers[k]){state.layers[k].remove();state.layers[k]=null}})}
-function renderMetrics(){const s=state.summary;$('metrics').innerHTML=`<div class="metric">全体距離<b>${(s.route_length_m/1000).toFixed(2)} km</b></div><div class="metric">担当人数<b>${s.worker_count}人</b></div><div class="metric">重複倍率<b>${(s.route_ratio||s.duplication_ratio||0).toFixed(2)}</b></div>`;$('metrics').classList.remove('hidden')}
+function routeStepFeatures(){return (state.geojson?.features||[]).filter(f=>f.properties?.kind==='route_step').sort((a,b)=>(a.properties.seq||0)-(b.properties.seq||0))}
+function renderGeneratedMap(){
+  clearRouteLayers();
+  const hasSteps=routeStepFeatures().length>0;
+  state.layers.generated=L.geoJSON(state.geojson,{
+    filter:f=>{const k=f.properties?.kind;return !(hasSteps&&(k==='route'||k==='worker_route'))},
+    style:f=>{
+      const k=f.properties?.kind;
+      if(k==='area')return state.areaGeojson?{weight:0,opacity:0,fillOpacity:0}:{weight:4,color:'#2563eb',opacity:.95,fillColor:'#3b82f6',fillOpacity:.14};
+      if(k==='road')return{weight:1.3,color:'#94a3b8',opacity:.45};
+      if(k==='route_step'){if(f.properties.transfer)return{weight:4,color:'#64748b',opacity:.8,dashArray:'8 8'};if(f.properties.duplicated)return{weight:6,color:'#f59e0b',opacity:.9};return{weight:6,color:'#ef4444',opacity:.92}}
+      if(k==='worker_route')return{weight:5,color:'#ef4444',opacity:.75};
+      if(k==='route')return{weight:3,color:'#f59e0b',opacity:.35};
+      return{weight:2,color:'#64748b'}
+    }
+  }).addTo(map);
+  drawRouteDirections(routeStepFeatures());
+  const b=state.layers.generated.getBounds();if(b.isValid())map.fitBounds(b,{padding:[15,15]})
+}
+function clearRouteLayers(){['generated','todo','done','gps','directions','sequence'].forEach(k=>{if(state.layers[k]){state.layers[k].remove();state.layers[k]=null}})}
+function bearingDeg(a,b){const p=Math.PI/180,y=Math.sin((b[0]-a[0])*p)*Math.cos(b[1]*p),x=Math.cos(a[1]*p)*Math.sin(b[1]*p)-Math.sin(a[1]*p)*Math.cos(b[1]*p)*Math.cos((b[0]-a[0])*p);return(Math.atan2(y,x)/p+360)%360}
+function interpolateCoord(a,b,t){return[a[0]+(b[0]-a[0])*t,a[1]+(b[1]-a[1])*t]}
+function drawRouteDirections(features){
+  if(state.layers.directions)state.layers.directions.remove();if(state.layers.sequence)state.layers.sequence.remove();
+  const arrows=L.layerGroup(), numbers=L.layerGroup();
+  const showArrows=$('showArrows')?.checked!==false, showNumbers=$('showNumbers')?.checked!==false;
+  features.forEach((f,idx)=>{const c=f.geometry?.coordinates;if(!c||c.length<2)return;const transfer=!!f.properties.transfer;
+    for(let j=0;j<c.length-1;j++){const a=c[j],b=c[j+1],len=haversine(a[1],a[0],b[1],b[0]);const count=Math.max(1,Math.ceil(len/45));for(let n=0;n<count;n++){if(!showArrows)break;const t=(n+.5)/count,pt=interpolateCoord(a,b,t),deg=bearingDeg(a,b);L.marker([pt[1],pt[0]],{interactive:false,icon:L.divIcon({className:'route-arrow-wrap',html:`<div class="route-arrow ${transfer?'transfer':''}" style="transform:rotate(${deg}deg)">➜</div>`,iconSize:[24,24],iconAnchor:[12,12]})}).addTo(arrows)}}
+    if(showNumbers&&!transfer&&(idx===0||(f.properties.seq||0)%10===0)){const p=c[0];L.marker([p[1],p[0]],{interactive:false,icon:L.divIcon({className:'route-seq-wrap',html:`<div class="route-seq">${f.properties.seq}</div>`,iconSize:[28,28],iconAnchor:[14,14]})}).addTo(numbers)}
+  });
+  if(features.length){const first=features[0].geometry.coordinates[0],lastF=features[features.length-1],last=lastF.geometry.coordinates.at(-1);L.marker([first[1],first[0]],{icon:L.divIcon({className:'route-end-wrap',html:'<div class="route-end start">START</div>',iconSize:[52,24],iconAnchor:[26,12]})}).addTo(numbers);L.marker([last[1],last[0]],{icon:L.divIcon({className:'route-end-wrap',html:'<div class="route-end goal">GOAL</div>',iconSize:[48,24],iconAnchor:[24,12]})}).addTo(numbers)}
+  state.layers.directions=arrows.addTo(map);state.layers.sequence=numbers.addTo(map);
+}
+function renderMetrics(){const s=state.summary;$('metrics').innerHTML=`<div class="metric">全体距離<b>${(s.route_length_m/1000).toFixed(2)} km</b></div><div class="metric">対象道路<b>${s.source_edges||0}本</b></div><div class="metric">非連結成分<b>${s.component_count||1}</b></div><div class="metric">重複倍率<b>${(s.route_ratio||s.duplication_ratio||0).toFixed(2)}</b></div><div class="metric">移動区間<b>${((s.transfer_length_m||0)/1000).toFixed(2)} km</b></div><div class="metric">担当人数<b>${s.worker_count}人</b></div>`;$('metrics').classList.remove('hidden')}
 function renderDownloads(){const base=`${API}/download/${state.jobId}`;$('downloads').innerHTML=`<label>成果物</label><a href="${base}/posting_navigator_results.zip">一式ZIP</a><a href="${base}/posting_navigator.kmz">統合KMZ</a><a href="${base}/posting_navigator.kml">統合KML</a><a href="${base}/assignments.csv">担当CSV</a><a href="${base}/summary.json">集計JSON</a>`;$('downloads').classList.remove('hidden')}
 
 async function createSharedProject(){try{const j=await api('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_id:state.jobId})});state.projectId=j.project_id;state.shareCode=j.share_code;localStorage.setItem('pn_last_project',JSON.stringify({projectId:state.projectId,shareCode:state.shareCode}));renderProjectBox();startTeamSync()}catch(e){status('teamStatus',`共有プロジェクトを作成できません: ${e.message}`,'error')}}
@@ -64,7 +95,7 @@ $('fieldWorker').onchange=()=>loadWorker(+$('fieldWorker').value);
 function workerFeatures(){return (state.geojson?.features||[]).filter(f=>f.properties?.kind==='worker_route').sort((a,b)=>a.properties.worker_id-b.properties.worker_id)}
 function loadWorker(workerId){state.workerId=workerId;const feat=workerFeatures().find(f=>+f.properties.worker_id===workerId);if(!feat)return;const coords=feat.geometry.coordinates;state.segments=[];state.segmentLengths=[];for(let i=0;i<coords.length-1;i++){state.segments.push([coords[i],coords[i+1]]);state.segmentLengths.push(haversine(coords[i][1],coords[i][0],coords[i+1][1],coords[i+1][0]))}const key=progressKey();let saved=[];try{saved=JSON.parse(localStorage.getItem(key)||'[]')}catch{}state.completed=new Set(saved);$('fieldWorkerName').textContent=feat.properties.name||`担当${workerId}`;drawFieldRoute();updateFieldProgress();pullProgress()}
 function progressKey(){return `pn_progress_${state.projectId||'local'}_${state.workerId}`}
-function drawFieldRoute(){if(!state.areaGeojson&&state.geojson){const areaOnly={type:'FeatureCollection',features:(state.geojson.features||[]).filter(f=>f.properties?.kind==='area')};if(areaOnly.features.length){state.areaGeojson=areaOnly;renderAreaBoundaries(false)}}if(state.layers.generated){state.layers.generated.remove();state.layers.generated=null}if(state.layers.todo)state.layers.todo.remove();if(state.layers.done)state.layers.done.remove();const todo=[],done=[];state.segments.forEach((s,i)=>(state.completed.has(i)?done:todo).push({type:'Feature',properties:{segment:i},geometry:{type:'LineString',coordinates:s}}));state.layers.todo=L.geoJSON({type:'FeatureCollection',features:todo},{style:{color:'#ef4444',weight:7,opacity:.82}}).addTo(map);state.layers.done=L.geoJSON({type:'FeatureCollection',features:done},{style:{color:'#22c55e',weight:8,opacity:.95}}).addTo(map);const both=L.featureGroup([state.layers.todo,state.layers.done]);const b=both.getBounds();if(b.isValid())map.fitBounds(b,{padding:[20,20]})}
+function drawFieldRoute(){if(!state.areaGeojson&&state.geojson){const areaOnly={type:'FeatureCollection',features:(state.geojson.features||[]).filter(f=>f.properties?.kind==='area')};if(areaOnly.features.length){state.areaGeojson=areaOnly;renderAreaBoundaries(false)}}if(state.layers.generated){state.layers.generated.remove();state.layers.generated=null}if(state.layers.todo)state.layers.todo.remove();if(state.layers.done)state.layers.done.remove();if(state.layers.directions)state.layers.directions.remove();if(state.layers.sequence)state.layers.sequence.remove();const todo=[],done=[],arrows=L.layerGroup();state.segments.forEach((s,i)=>{(state.completed.has(i)?done:todo).push({type:'Feature',properties:{segment:i},geometry:{type:'LineString',coordinates:s}});if($('showArrows')?.checked!==false){const a=s[0],b=s[1],pt=interpolateCoord(a,b,.5),deg=bearingDeg(a,b);L.marker([pt[1],pt[0]],{interactive:false,icon:L.divIcon({className:'route-arrow-wrap',html:`<div class="route-arrow field" style="transform:rotate(${deg}deg)">➜</div>`,iconSize:[22,22],iconAnchor:[11,11]})}).addTo(arrows)}});state.layers.todo=L.geoJSON({type:'FeatureCollection',features:todo},{style:{color:'#ef4444',weight:7,opacity:.82}}).addTo(map);state.layers.done=L.geoJSON({type:'FeatureCollection',features:done},{style:{color:'#22c55e',weight:8,opacity:.95}}).addTo(map);state.layers.directions=arrows.addTo(map);const both=L.featureGroup([state.layers.todo,state.layers.done]);const b=both.getBounds();if(b.isValid())map.fitBounds(b,{padding:[20,20]})}
 function updateFieldProgress(){const done=[...state.completed].reduce((s,i)=>s+(state.segmentLengths[i]||0),0), total=state.segmentLengths.reduce((a,b)=>a+b,0),pct=total?done/total*100:0;$('fieldPercent').textContent=`${pct.toFixed(1)}%`;$('fieldDistance').textContent=`${(done/1000).toFixed(2)} / ${(total/1000).toFixed(2)} km`;localStorage.setItem(progressKey(),JSON.stringify([...state.completed]));return{done,total,pct}}
 $('gpsThreshold').oninput=()=>$('gpsThresholdText').textContent=$('gpsThreshold').value;
 
@@ -88,6 +119,9 @@ let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.prev
 
 function haversine(lat1,lon1,lat2,lon2){const R=6371000,p=Math.PI/180,dLat=(lat2-lat1)*p,dLon=(lon2-lon1)*p,a=Math.sin(dLat/2)**2+Math.cos(lat1*p)*Math.cos(lat2*p)*Math.sin(dLon/2)**2;return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))}
 function pointSegmentMeters(lat,lon,lat1,lon1,lat2,lon2){const mLat=(lat+lat1+lat2)/3*Math.PI/180,x=(v)=>v*Math.PI/180*6371000*Math.cos(mLat),y=(v)=>v*Math.PI/180*6371000;const px=x(lon),py=y(lat),ax=x(lon1),ay=y(lat1),bx=x(lon2),by=y(lat2),dx=bx-ax,dy=by-ay;const t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/(dx*dx+dy*dy||1)));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy))}
+$('showArrows')?.addEventListener('change',()=>state.geojson&&renderGeneratedMap());
+$('showNumbers')?.addEventListener('change',()=>state.geojson&&renderGeneratedMap());
+
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
 
 loadConfig();

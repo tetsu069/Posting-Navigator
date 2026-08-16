@@ -1,19 +1,21 @@
-# Posting Navigator v1.0.2
+# Posting Navigator v1.0.3
 
 町丁目KMZとOpenStreetMap道路からポスティング巡回ルートを生成し、現場ではスマホGPSで配布済み区間を自動記録するWeb/PWAです。GitHub Pagesを画面、RenderをPython APIとして利用できます。
 
 
-## v1.0.2 で追加・修正
+## v1.0.3 で追加・修正
 
-- Overpass API リクエストに User-Agent / Referer / Accept を明示
-- `overpass.kumi.systems` を現行の `overpass.private.coffee` へ更新
-- private.coffee / overpass-api.de / VK Maps の3系統へ自動フェイルオーバー
-- 406時は text/plain POST へ互換リトライ
-- 429時は接続先をクールダウンし別ミラーへ自動切替
-- 壊れたOSMキャッシュを自動破棄して再取得
-- OSM取得失敗時は確認用ダミールートを既定で使用しない
-- GitHub Pages 公開用 Render API URLを `docs/config.js` に保持
-- v1.0.1の町丁目境界・薄色表示を維持
+- 道路網を単に色塗りする方式から、**巡回順序付きステップ列**へ変更
+- Chinese Postman方式で対象道路をできるだけ一筆書きに近く巡回
+- 小さな非連結道路成分を最大成分から落とさず、全成分を巡回対象に保持
+- 各巡回ステップに `seq`（順番）・道路種別・OSM ID・重複通行情報を保持
+- 地図上に進行方向の矢印 `→` を約45m間隔で表示
+- 巡回順番号を10ステップごとに表示し、START / GOALも表示
+- 通常巡回=赤、必要な重複通行=橙、非連結道路への移動=灰色点線で区別
+- 現場モードにも担当ルートの進行方向矢印を表示
+- メトリクスに対象道路本数・非連結成分数・移動区間距離を追加
+- v1.0.2のOverpass複数ミラー・User-Agent対応、町丁目境界/薄色表示を維持
+- GitHub Pages公開用Render URLを `docs/config.js` に保持
 
 ## v1.0で追加
 
@@ -61,7 +63,7 @@ Render (posting_navigator.webapp)
 2. Render → New → Blueprint → このリポジトリを選択。
 3. `render.yaml` を適用。
 4. デプロイ後のURL（例 `https://posting-navigator-api.onrender.com`）を控える。
-5. `/api/health` を開き、`"version":"1.0.0"` を確認。
+5. `/api/health` を開き、`"version":"1.0.3"` を確認。
 
 Renderの環境変数：
 

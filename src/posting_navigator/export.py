@@ -13,7 +13,7 @@ def _coords_text(coords) -> str:
 
 
 def _route_properties(route: dict) -> dict:
-    excluded = {"geometry", "start_point", "requested_start", "assignments"}
+    excluded = {"geometry", "start_point", "requested_start", "assignments", "route_steps"}
     return {k: v for k, v in route.items() if k not in excluded}
 
 
@@ -73,6 +73,9 @@ def write_geojson(area_name: str, boundary: Polygon, roads: list[dict], route: d
     features = [{"type": "Feature", "properties": {"kind": "area", "name": area_name}, "geometry": mapping(boundary)}]
     features += [{"type": "Feature", "properties": {"kind": "road", "highway": r.get("highway"), "name": r.get("name")}, "geometry": mapping(r["geometry"])} for r in roads]
     features.append({"type": "Feature", "properties": {"kind": "route", **_route_properties(route)}, "geometry": mapping(route["geometry"])})
+    for step in route.get("route_steps", []):
+        props = {k: v for k, v in step.items() if k not in {"geometry", "from", "to"}}
+        features.append({"type": "Feature", "properties": {"kind": "route_step", **props}, "geometry": mapping(step["geometry"])})
     features.append({"type": "Feature", "properties": {"kind": "start", "name": "開始地点"}, "geometry": mapping(route["start_point"])})
     for assignment in route.get("assignments", []):
         features.append({"type": "Feature", "properties": {"kind": "worker_route", **_assignment_properties(assignment)}, "geometry": mapping(assignment["geometry"])})
