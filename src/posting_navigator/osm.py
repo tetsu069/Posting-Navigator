@@ -28,7 +28,7 @@ _ENDPOINT_COOLDOWN_UNTIL: dict[str, float] = {}
 def overpass_query(poly: Polygon) -> str:
     """道路に加え、住宅密度と非住宅敷地の判定に必要なOSM要素も取得する。
 
-    v1.0.12では「道路だから全部巡回」ではなく、住宅がある道路を配布対象にし、
+    v1.0.13では「道路だから全部巡回」ではなく、住宅がある道路を配布対象にし、
     公園・学校・緑地の園路は必要な移動時だけconnectorとして残す。
     """
     minx, miny, maxx, maxy = poly.bounds
@@ -52,7 +52,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.0.12 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.0.13 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -136,7 +136,7 @@ def fetch_osm_roads(poly: Polygon, cache_path: str | Path | None = None, timeout
         if cache_path.exists():
             try:
                 cached = json.loads(cache_path.read_text(encoding="utf-8"))
-                # v1.0.12から建物・公園等のcontext要素が必要。旧道路-onlyキャッシュは使わない。
+                # v1.0.13から建物・公園等のcontext要素が必要。旧道路-onlyキャッシュは使わない。
                 if cached.get("_pn_cache_schema") != 2 or "data" not in cached:
                     raise ValueError("old cache schema")
                 return _validate_overpass_json(cached["data"], "cache")
@@ -343,7 +343,7 @@ def _road_context_score(geom_m: LineString, highway: str, service: str, building
 def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
     """Overpass道路を町丁目内の巡回可能な形状へ切り出す。
 
-    v1.0.12:
+    v1.0.13:
     - 境界道路を『探す』8m帯と、実際に『歩いてよい』1.5m帯を分離。
     - 建物密度と公園・学校・緑地ポリゴンを使い、配布先のない園路をconnector-only化。
     - 通常道路は町丁目＋1.5mでクリップ。
