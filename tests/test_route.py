@@ -37,19 +37,19 @@ def test_split_route_balances_distance_and_preserves_continuity():
         assert previous["end_point"].distance(current["start_point"]) < 1e-12
 
 
-def test_disconnected_components_are_not_joined_by_fake_straight_line():
+def test_route_keeps_disconnected_components_and_ordered_steps():
     from shapely.geometry import LineString
     from posting_navigator.routing import generate_route
     roads = [
         {"id": 1, "highway": "residential", "name": "A", "geometry": LineString([(139.0,35.0),(139.001,35.0)])},
         {"id": 2, "highway": "residential", "name": "B", "geometry": LineString([(139.01,35.0),(139.011,35.0)])},
     ]
-    try:
-        generate_route(roads, start_point=(139.0,35.0))
-    except ValueError as exc:
-        assert "接続" in str(exc) or "実道路" in str(exc)
-    else:
-        raise AssertionError("非連結道路を直線で接続してはいけない")
+    route = generate_route(roads, start_point=(139.0,35.0))
+    assert route["component_count"] == 2
+    assert route["source_edges"] == 2
+    assert any(step["transfer"] for step in route["route_steps"])
+    assert {step["osm_id"] for step in route["route_steps"] if not step["transfer"]} == {1,2}
+    assert [s["seq"] for s in route["route_steps"]] == list(range(1, len(route["route_steps"])+1))
 
 
 def test_navigation_legs_follow_road_geometry():

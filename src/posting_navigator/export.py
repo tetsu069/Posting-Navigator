@@ -18,7 +18,7 @@ def _route_properties(route: dict) -> dict:
 
 
 def _assignment_properties(assignment: dict) -> dict:
-    return {k: v for k, v in assignment.items() if k not in {"geometry", "worker_area", "start_point", "end_point", "route_steps", "navigation_legs"}}
+    return {k: v for k, v in assignment.items() if k not in {"geometry", "start_point", "end_point"}}
 
 
 def write_kml(area_name: str, boundary: Polygon, roads: list[dict], route: dict, output_path: str | Path) -> Path:
@@ -26,8 +26,6 @@ def write_kml(area_name: str, boundary: Polygon, roads: list[dict], route: dict,
     output_path.parent.mkdir(parents=True, exist_ok=True)
     road_placemarks = []
     for road in roads:
-        if not road.get("posting_target", True):
-            continue
         road_placemarks.append(f'''<Placemark><name>{html.escape(road.get("name") or road.get("highway") or "道路")}</name>
 <styleUrl>#road</styleUrl><ExtendedData><Data name="highway"><value>{html.escape(road.get("highway", ""))}</value></Data></ExtendedData><LineString><tessellate>1</tessellate><coordinates>{_coords_text(road["geometry"].coords)}</coordinates></LineString></Placemark>''')
     desc = html.escape(json.dumps(_route_properties(route), ensure_ascii=False))
@@ -41,11 +39,7 @@ def write_kml(area_name: str, boundary: Polygon, roads: list[dict], route: dict,
         props = html.escape(json.dumps(_assignment_properties(assignment), ensure_ascii=False))
         style_id = ((assignment["worker_id"] - 1) % 8) + 1
         s, e = assignment["start_point"], assignment["end_point"]
-        area_pm = ""
-        if assignment.get("worker_area") is not None and assignment["worker_area"].geom_type == "Polygon":
-            area_pm = f'<Placemark><name>{html.escape(assignment["name"])} 担当エリア</name><styleUrl>#area</styleUrl><Polygon><outerBoundaryIs><LinearRing><coordinates>{_coords_text(assignment["worker_area"].exterior.coords)}</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>'
         assignment_folders.append(f'''<Folder><name>{html.escape(assignment["name"])}</name>
-{area_pm}
 <Placemark><name>{html.escape(assignment["name"])} 巡回区間</name><description>{props}</description><styleUrl>#worker{style_id}</styleUrl><LineString><tessellate>1</tessellate><coordinates>{_coords_text(assignment["geometry"].coords)}</coordinates></LineString></Placemark>
 <Placemark><name>{html.escape(assignment["name"])} 開始</name><styleUrl>#start</styleUrl><Point><coordinates>{s.x:.7f},{s.y:.7f},0</coordinates></Point></Placemark>
 <Placemark><name>{html.escape(assignment["name"])} 終了</name><Point><coordinates>{e.x:.7f},{e.y:.7f},0</coordinates></Point></Placemark></Folder>''')
@@ -77,7 +71,7 @@ def write_kmz(kml_path: str | Path, kmz_path: str | Path) -> Path:
 
 def write_geojson(area_name: str, boundary: Polygon, roads: list[dict], route: dict, output_path: str | Path) -> Path:
     features = [{"type": "Feature", "properties": {"kind": "area", "name": area_name}, "geometry": mapping(boundary)}]
-    features += [{"type": "Feature", "properties": {"kind": "road", "highway": r.get("highway"), "name": r.get("name"), "residential_score": r.get("residential_score"), "nearest_building_m": r.get("nearest_building_m")}, "geometry": mapping(r["geometry"])} for r in roads if r.get("posting_target", True)]
+    features += [{"type": "Feature", "properties": {"kind": "road", "highway": r.get("highway"), "name": r.get("name")}, "geometry": mapping(r["geometry"])} for r in roads]
     features.append({"type": "Feature", "properties": {"kind": "route", **_route_properties(route)}, "geometry": mapping(route["geometry"])})
     for step in route.get("route_steps", []):
         props = {k: v for k, v in step.items() if k not in {"geometry", "from", "to"}}
@@ -87,23 +81,14 @@ def write_geojson(area_name: str, boundary: Polygon, roads: list[dict], route: d
         features.append({"type": "Feature", "properties": {"kind": "navigation_leg", **props}, "geometry": mapping(leg["geometry"])})
     features.append({"type": "Feature", "properties": {"kind": "start", "name": "開始地点"}, "geometry": mapping(route["start_point"])})
     for assignment in route.get("assignments", []):
-        props = _assignment_properties(assignment)
-        if assignment.get("worker_area") is not None:
-            features.append({"type": "Feature", "properties": {"kind": "worker_area", **props}, "geometry": mapping(assignment["worker_area"])})
-        features.append({"type": "Feature", "properties": {"kind": "worker_route", **props}, "geometry": mapping(assignment["geometry"])})
-        for step in assignment.get("route_steps", []):
-            sp = {k:v for k,v in step.items() if k not in {"geometry", "from", "to"}}
-            features.append({"type":"Feature","properties":{"kind":"worker_route_step","worker_id":assignment["worker_id"],**sp},"geometry":mapping(step["geometry"])})
-        for leg in assignment.get("navigation_legs", []):
-            lp = {k:v for k,v in leg.items() if k != "geometry"}
-            features.append({"type":"Feature","properties":{"kind":"worker_navigation_leg","worker_id":assignment["worker_id"],**lp},"geometry":mapping(leg["geometry"])})
+        features.append({"type": "Feature", "properties": {"kind": "worker_route", **_assignment_properties(assignment)}, "geometry": mapping(assignment["geometry"])})
     Path(output_path).write_text(json.dumps({"type": "FeatureCollection", "features": features}, ensure_ascii=False, indent=2), encoding="utf-8")
     return Path(output_path)
 
 
 def write_assignments_csv(assignments: list[dict], output_path: str | Path) -> Path:
     output_path = Path(output_path)
-    fields = ["worker_id", "name", "estimated_households", "length_m", "estimated_minutes", "difference_from_average_m", "start_lon", "start_lat", "end_lon", "end_lat"]
+    fields = ["worker_id", "name", "length_m", "difference_from_average_m", "start_lon", "start_lat", "end_lon", "end_lat"]
     with output_path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()

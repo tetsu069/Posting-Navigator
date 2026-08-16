@@ -116,13 +116,13 @@ def public_file(filename: str):
 
 @app.get("/api/health")
 def api_health():
-    return jsonify(status="ok", service="posting-navigator-api", version="1.0.21")
+    return jsonify(status="ok", service="posting-navigator-api", version="1.0.9")
 
 
 @app.get("/api/config")
 def api_config():
     return jsonify(
-        version="1.0.21",
+        version="1.0.9",
         google_client_id=os.getenv("GOOGLE_CLIENT_ID", ""),
         gps_threshold_m=float(os.getenv("GPS_THRESHOLD_M", "18")),
         sync_interval_ms=int(os.getenv("SYNC_INTERVAL_MS", "5000")),
@@ -195,35 +195,14 @@ def api_areas():
 
 @app.post("/api/build")
 def api_build():
-    # v1.0.21: Build requests are self-contained.  The browser sends the KMZ
-    # again together with the currently selected area, so a Render restart or
-    # cleanup between /api/areas and /api/build cannot invalidate the job.
-    is_multipart = bool(request.files) or request.mimetype == "multipart/form-data"
-    payload = request.form if is_multipart else (request.get_json(silent=True) or {})
+    payload = request.get_json(force=True)
     upload_id = str(payload.get("upload_id", ""))
     area = str(payload.get("area", "")).strip()
-    try:
-        workers = int(payload.get("workers", 1))
-    except (TypeError, ValueError):
-        return jsonify(error="担当人数は1〜30人で指定してください"), 400
-    if not 1 <= workers <= 30:
-        return jsonify(error="担当人数は1〜30人で指定してください"), 400
-
-    uploaded_file = request.files.get("kmz") if is_multipart else None
-    temp_kmz = None
-    if uploaded_file and uploaded_file.filename.lower().endswith(".kmz"):
-        temp_kmz = UPLOADS / f"build-{uuid.uuid4().hex}.kmz"
-        uploaded_file.save(temp_kmz)
-        kmz = temp_kmz
-    else:
-        kmz = UPLOADS / f"{upload_id}.kmz"
-
-    if not area:
-        if temp_kmz:
-            temp_kmz.unlink(missing_ok=True)
-        return jsonify(error="対象町丁目を選択してください"), 400
-    if not kmz.exists():
-        return jsonify(error="KMZファイルを再選択してください"), 400
+    # 1町丁目 = 1巡回ルート。複数人への自動分割は行わない。
+    workers = 1
+    kmz = UPLOADS / f"{upload_id}.kmz"
+    if not kmz.exists() or not area:
+        return jsonify(error="KMZまたは町丁目が選択されていません"), 400
 
     def num(name: str):
         value = payload.get(name)
@@ -231,12 +210,7 @@ def api_build():
 
     start_lat, start_lon = num("start_lat"), num("start_lon")
     if (start_lat is None) != (start_lon is None):
-        if temp_kmz:
-            temp_kmz.unlink(missing_ok=True)
         return jsonify(error="開始地点は緯度・経度を両方指定してください"), 400
-
-    offline_raw = payload.get("offline_fallback", False)
-    offline_fallback = offline_raw is True or str(offline_raw).lower() in {"1", "true", "yes", "on"}
 
     job_id = uuid.uuid4().hex
     out = _job_dir(job_id)
@@ -245,7 +219,7 @@ def api_build():
             kmz=kmz, area=area, output=out, workers=workers,
             start_lat=start_lat, start_lon=start_lon,
             cache=RUNTIME / "cache" / f"{area}.json",
-            offline_fallback=offline_fallback,
+            offline_fallback=bool(payload.get("offline_fallback", False)),
         )
         bundle = out / "posting_navigator_results.zip"
         with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -257,9 +231,6 @@ def api_build():
     except Exception as exc:
         shutil.rmtree(out, ignore_errors=True)
         return jsonify(error=f"ルート生成に失敗しました: {exc}"), 500
-    finally:
-        if temp_kmz:
-            temp_kmz.unlink(missing_ok=True)
 
 
 @app.post("/api/projects")

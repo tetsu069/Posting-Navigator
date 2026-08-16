@@ -13,8 +13,8 @@
 <body>
 <div class="app-shell">
   <header class="topbar">
-    <div><h1>Posting Navigator</h1><p>ルート作成・GPS進捗・チーム共有</p></div>
-    <div class="top-actions"><span class="badge">v1.0.21</span><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
+    <div><h1>Posting Navigator</h1><p>ルート作成・GPS進捗・進捗共有</p></div>
+    <div class="top-actions"><span class="badge">v1.0.9</span><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
   </header>
 
   <main class="layout">
@@ -34,10 +34,7 @@
         <select id="area" disabled><option>KMZを先に選択</option></select>
         <div id="householdBox" class="household-box hidden"><span>世帯数</span><b id="householdTotal">—</b><small>KMZ登録値</small></div>
 
-        <label>3. 担当人数</label>
-        <input id="workers" type="number" value="4" min="1" max="30">
-
-        <label>4. 開始地点（任意）</label>
+        <label>3. 開始地点（任意）</label>
         <div class="row"><input id="lat" type="number" step="any" placeholder="緯度"><input id="lon" type="number" step="any" placeholder="経度"></div>
         <div class="hint">通常の地図クリックでは開始地点は動きません。開始地点を変更するときだけ下のボタンを使います。</div>
         <div class="row buttons start-buttons"><button id="pickStart" class="secondary">地図で開始地点を指定</button><button id="useCurrent" class="secondary">現在地を開始地点にする</button></div>

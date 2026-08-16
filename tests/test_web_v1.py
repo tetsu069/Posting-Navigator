@@ -10,7 +10,7 @@ def test_health_and_config(tmp_path, monkeypatch):
     monkeypatch.setenv('POSTING_NAV_DB', str(tmp_path / 'test.db'))
     from posting_navigator.webapp import app
     c = app.test_client()
-    assert c.get('/api/health').get_json()['version'] == '1.0.21'
+    assert c.get('/api/health').get_json()['version'] == '1.0.3'
     cfg = c.get('/api/config').get_json()
     assert cfg['gps_threshold_m'] > 0
 
@@ -48,35 +48,3 @@ def test_areas_returns_boundary_geojson():
     assert j['areas']
     assert j['area_geojson']['type'] == 'FeatureCollection'
     assert len(j['area_geojson']['features']) == len(j['areas'])
-
-
-def test_build_accepts_kmz_again_in_multipart(tmp_path, monkeypatch):
-    import io
-    import json
-    import posting_navigator.webapp as w
-
-    def fake_run_build(*, kmz, area, output, workers, start_lat, start_lon, cache, offline_fallback):
-        assert Path(kmz).exists()
-        assert area == '富久町'
-        assert workers == 2
-        assert offline_fallback is False
-        output.mkdir(parents=True, exist_ok=True)
-        geo = {'type':'FeatureCollection','features':[]}
-        (output / 'posting_navigator.geojson').write_text(json.dumps(geo), encoding='utf-8')
-        (output / 'summary.json').write_text(json.dumps({'worker_count':2,'data_mode':'test'}), encoding='utf-8')
-        return {'worker_count':2,'data_mode':'test'}
-
-    monkeypatch.setattr(w, 'run_build', fake_run_build)
-    kmz = Path(__file__).parents[1] / 'data' / 'input' / 'shinjuku_posting_map.kmz'
-    c = w.app.test_client()
-    with kmz.open('rb') as fh:
-        r = c.post('/api/build', data={
-            'kmz': (io.BytesIO(fh.read()), 'areas.kmz'),
-            'area': '富久町',
-            'workers': '2',
-            'start_lat': '',
-            'start_lon': '',
-            'offline_fallback': '0',
-        }, content_type='multipart/form-data')
-    assert r.status_code == 200, r.get_data(as_text=True)
-    assert r.get_json()['summary']['data_mode'] == 'test'
