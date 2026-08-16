@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import math
 import networkx as nx
-from pyproj import Geod
 from shapely.geometry import LineString, Point
 from shapely.ops import unary_union
-
-GEOD = Geod(ellps="WGS84")
 
 # 幹線道路は対象には残すが、奇数頂点解消のための余分な往復では強い罰則を付ける。
 HIGHWAY_PENALTY = {
@@ -29,7 +26,43 @@ HIGHWAY_PENALTY = {
 
 
 def _dist_m(a: tuple[float, float], b: tuple[float, float]) -> float:
-    return abs(GEOD.inv(a[0], a[1], b[0], b[1])[2])
+    """Fast local distance in metres for town-scale routing.
+
+    v1.0.15 deliberately avoids pyproj.Geod.inv() here.  This helper is called
+    tens of thousands of times while ordering disconnected road components and
+    while building navigation legs.  For distances of a few kilometres the
+    equirectangular approximation is far more than accurate enough for routing
+    heuristics and removes a major CPU/memory pressure point on Render Free.
+    """
+    lon1, lat1 = a
+    lon2, lat2 = b
+    latm = math.radians((lat1 + lat2) * 0.5)
+    dx = math.radians(lon2 - lon1) * math.cos(latm) * 6371008.8
+    dy = math.radians(lat2 - lat1) * 6371008.8
+    return math.hypot(dx, dy)
+
+
+def _bbox_lower_bound_m(bbox: tuple[float, float, float, float], point: tuple[float, float]) -> float:
+    """Lower-bound distance from a point to a lon/lat bbox, using _dist_m."""
+    minx, miny, maxx, maxy = bbox
+    x = min(max(point[0], minx), maxx)
+    y = min(max(point[1], miny), maxy)
+    return _dist_m(point, (x, y))
+
+
+def _component_meta(nodes: set[tuple[float, float]]) -> dict:
+    xs = [n[0] for n in nodes]
+    ys = [n[1] for n in nodes]
+    return {
+        "nodes": nodes,
+        "bbox": (min(xs), min(ys), max(xs), max(ys)),
+        "center": ((min(xs) + max(xs)) * 0.5, (min(ys) + max(ys)) * 0.5),
+    }
+
+
+def _nearest_node_fast(nodes, point: tuple[float, float]) -> tuple[float, float]:
+    """Nearest node with the inexpensive town-scale distance metric."""
+    return min(nodes, key=lambda n: _dist_m(n, point))
 
 
 def _snap(p: tuple[float, float], precision: int = 6) -> tuple[float, float]:
@@ -179,23 +212,46 @@ def eulerize_weighted(g: nx.MultiGraph) -> nx.MultiGraph:
 
 
 def _component_order(graph: nx.MultiGraph, start_point: tuple[float, float] | None) -> list[set]:
-    """全連結成分を巡回する順。最初は開始地点に近い成分、以後は直前位置から近い成分。"""
+    """Order disconnected road components without all-node/all-component scans.
+
+    v1.0.14 repeatedly evaluated every node of every remaining component with
+    pyproj.Geod.inv().  On dense Tokyo blocks this became the dominant hot path
+    and could terminate the Render Free worker.  v1.0.15 caches each component
+    bbox and only performs node-level nearest checks for the few components whose
+    bboxes are already closest to the current position.
+    """
     components = [set(c) for c in nx.connected_components(graph)]
     if len(components) <= 1:
         return components
-    remaining = components[:]
+
+    metas = [_component_meta(c) for c in components]
+
     if start_point is None:
-        first = max(remaining, key=lambda c: graph.subgraph(c).number_of_edges())
+        first_meta = max(metas, key=lambda m: graph.subgraph(m["nodes"]).number_of_edges())
+        # Deterministic representative for the first component.
+        current = min(first_meta["nodes"], key=lambda n: (n[1], n[0]))
     else:
-        first = min(remaining, key=lambda c: min(_dist_m(n, start_point) for n in c))
-    order = [first]
-    remaining.remove(first)
-    current = _nearest_node(graph.subgraph(first), start_point)
+        shortlist = sorted(metas, key=lambda m: _bbox_lower_bound_m(m["bbox"], start_point))[:4]
+        first_meta = min(
+            shortlist,
+            key=lambda m: _dist_m(_nearest_node_fast(m["nodes"], start_point), start_point),
+        )
+        current = _nearest_node_fast(first_meta["nodes"], start_point)
+
+    order = [first_meta["nodes"]]
+    remaining = [m for m in metas if m is not first_meta]
+
     while remaining:
-        nxt = min(remaining, key=lambda c: min(_dist_m(n, current) for n in c))
-        order.append(nxt)
-        current = min(nxt, key=lambda n: _dist_m(n, current))
-        remaining.remove(nxt)
+        # Bbox lower bounds cheaply eliminate almost all components.  Four is a
+        # small enough shortlist to keep memory/CPU bounded while still choosing
+        # the genuinely nearest component in normal street networks.
+        shortlist = sorted(remaining, key=lambda m: _bbox_lower_bound_m(m["bbox"], current))[:4]
+        nearest_pairs = [(_nearest_node_fast(m["nodes"], current), m) for m in shortlist]
+        entry, nxt_meta = min(nearest_pairs, key=lambda pair: _dist_m(pair[0], current))
+        order.append(nxt_meta["nodes"])
+        current = entry
+        remaining.remove(nxt_meta)
+
     return order
 
 
