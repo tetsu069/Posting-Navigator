@@ -11,3 +11,11 @@ services:
         value: https://YOUR-GITHUB-USER.github.io
       - key: MAX_UPLOAD_MB
         value: 25
+      - key: GPS_THRESHOLD_M
+        value: 18
+      - key: SYNC_INTERVAL_MS
+        value: 5000
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: POSTING_NAV_DB
+        value: web_runtime/posting_navigator.db

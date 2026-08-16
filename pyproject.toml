@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "posting-navigator"
-version = "0.5.0"
+version = "1.0.0"
 description = "KMZ町丁目境界とOpenStreetMap道路からポスティング巡回ルートを生成するCLI・Webアプリ"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,6 +17,7 @@ dependencies = [
   "flask>=3.0",
   "flask-cors>=4.0",
   "gunicorn>=22.0",
+  "google-auth>=2.29",
 ]
 
 [project.scripts]

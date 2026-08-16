@@ -1,30 +1,109 @@
-# Posting Navigator
+# Posting Navigator v1.0
 
-KMZの町丁目ポリゴンとOpenStreetMap道路データから、ポスティング用巡回ルートを生成し、Googleマイマップへ読み込めるKML/KMZを出力するプロジェクトです。
+町丁目KMZとOpenStreetMap道路からポスティング巡回ルートを生成し、現場ではスマホGPSで配布済み区間を自動記録するWeb/PWAです。GitHub Pagesを画面、RenderをPython APIとして利用できます。
 
-## v0.3.0
+## v1.0で追加
 
-- KMZから町丁目を名前で抽出
-- Overpass APIによるOSM道路自動取得、ミラー切替、キャッシュ
-- 町丁目境界で道路をクリップし、交差点で道路グラフ化
-- 幹線道路の重複通行へ罰則を付けた巡回ルート生成
-- 袋小路を含む全対象道路の巡回
-- 開始地点指定と最寄り道路への補正
-- 巡回順序を維持した複数担当者への距離均等分割
-- 全担当統合KML/KMZ、担当者別KML/KMZ、GeoJSON、CSV、summary.json出力
+- PWA対応（ホーム画面へ追加、アプリ風全画面表示）
+- スマホGPS追跡
+- 担当ルートの未配布=赤 / 配布済み=緑表示
+- GPS位置がルートから指定距離内に入ると区間を自動完了
+- 端末LocalStorageへ進捗保存
+- 6桁共有コードによる複数端末参加
+- 担当者別進捗をAPIへ保存し約5秒ごとに同期
+- Google Identity Servicesログイン（任意設定）
+- Googleログイン利用時、自分が作成した共有プロジェクト一覧を表示
+- 従来のKML/KMZ/GeoJSON/CSV出力を維持
 
-> `offline-fixture` は処理系の確認専用で実在道路ではありません。実運用時は `summary.json` の `data_mode` が `osm` であることを確認してください。
+## ローカル起動
 
-## セットアップ
+Windowsは `start_web.bat` をダブルクリックします。ブラウザで `http://127.0.0.1:8787` が開きます。
+
+手動の場合：
 
 ```bash
 python -m venv .venv
 # Windows: .venv\Scripts\activate
 # macOS/Linux: source .venv/bin/activate
 pip install -e .
+posting-navigator-web
 ```
 
-## 北新宿一丁目を4担当へ分割
+## 公開構成
+
+```text
+GitHub Pages (docs/)
+        |
+        | HTTPS API
+        v
+Render (posting_navigator.webapp)
+        |
+        +-- Overpass / OSM
+        +-- SQLite progress DB
+```
+
+### 1. RenderへAPIを公開
+
+1. GitHubへこのリポジトリをpush。
+2. Render → New → Blueprint → このリポジトリを選択。
+3. `render.yaml` を適用。
+4. デプロイ後のURL（例 `https://posting-navigator-api.onrender.com`）を控える。
+5. `/api/health` を開き、`"version":"1.0.0"` を確認。
+
+Renderの環境変数：
+
+- `ALLOWED_ORIGINS`: `https://あなたのGitHubユーザー名.github.io`
+- `GPS_THRESHOLD_M`: 初期の自動完了判定距離。既定18m
+- `SYNC_INTERVAL_MS`: チーム同期間隔。既定5000ms
+- `GOOGLE_CLIENT_ID`: Googleログインを使う場合のみ設定
+- `POSTING_NAV_DB`: SQLite DBパス
+
+### 2. GitHub PagesをAPIへ接続
+
+`docs/config.js` を編集します。
+
+```js
+window.POSTING_NAVIGATOR_API = 'https://実際のAPI名.onrender.com';
+```
+
+GitHub → Settings → Pages → Source を **GitHub Actions** にします。`.github/workflows/pages.yml` が `docs/` を公開します。
+
+### 3. PWAをスマホへ追加
+
+Android/Chromeではページを開き「アプリをインストール」または「ホーム画面に追加」。iPhone/Safariでは共有ボタン → 「ホーム画面に追加」です。GPS利用にはHTTPSが必要なので、公開運用ではGitHub PagesのHTTPS URLを使ってください。
+
+## Googleログイン設定（任意）
+
+1. Google Cloud ConsoleでOAuth 2.0 **Web application** のClient IDを作成。
+2. Authorized JavaScript originsへGitHub Pagesのオリジンを追加。
+   - 例: `https://YOUR-GITHUB-USER.github.io`
+3. Renderの `GOOGLE_CLIENT_ID` にClient IDを設定。
+4. Renderを再デプロイ。
+
+Googleログインなしでも、共有コードと進捗同期は利用できます。ログインを使うと「自分が作ったプロジェクト一覧」を呼び戻せます。
+
+## 現場での使い方
+
+1. 「ルート作成」でKMZ → 町丁目 → 人数を指定し、巡回ルートを生成。
+2. 自動的に共有コードが発行される。
+3. 各担当端末は共有コードで参加し、「現場モード」で自分の担当を選択。
+4. 「GPS開始」。ルートから設定距離内を通ると、該当区間が赤から緑へ変化。
+5. 「チーム」タブで全担当の進捗を確認。
+
+GPS誤差や並行道路が近接する場所では誤判定の可能性があります。現場では判定距離を8〜40mで調整できます。
+
+## データ永続化について
+
+進捗は端末のLocalStorageにも保存されるため、同じ端末ではブラウザ再読み込み後も復元できます。API側はSQLiteです。Renderの一時ディスクだけで運用するとサービス再起動・再デプロイでDBが消える可能性があります。本番で履歴を永続保存する場合は、Render Persistent Diskを `/var/data` などにマウントし、`POSTING_NAV_DB=/var/data/posting_navigator.db` に変更してください（利用プランの条件を確認してください）。将来PostgreSQL等へ置換できるようAPI層を分離しています。
+
+## テスト
+
+```bash
+pytest -q
+node --check docs/app.js
+```
+
+## 既存CLI
 
 ```bash
 posting-navigator build \
@@ -36,69 +115,4 @@ posting-navigator build \
   --workers 4
 ```
 
-実OSM以外を許可しない場合は `--no-offline-fallback` を追加します。
-
-## 出力
-
-- `posting_navigator.kml / .kmz`: 全体ルートと担当別レイヤー
-- `workers/worker_01.kml / .kmz` など: 各担当者専用
-- `posting_navigator.geojson`: GIS・デバッグ用
-- `assignments.csv`: 担当距離、開始・終了座標
-- `boundary.geojson`: 町丁目境界
-- `summary.json`: 距離、重複率、袋小路数、担当別集計、データモード
-
-## 分割方式
-
-中国人郵便配達問題の近似解として生成した一続きの巡回順序を、累積距離が担当者数分の等分点に達した場所で分割します。道路の途中でも補間点を作るため、担当距離の差をほぼゼロにできます。担当区間は連続し、前担当の終了地点と次担当の開始地点が一致します。
-
-## テスト
-
-```bash
-pytest -q
-```
-
-## Web画面版（v0.4.0）
-
-Windowsでは `start_web.bat` をダブルクリックしてください。初回だけ仮想環境と必要ライブラリを自動準備し、ブラウザで `http://127.0.0.1:8787` を開きます。
-
-画面の操作順：
-1. KMZを選択
-2. 対象町丁目を選択
-3. 担当人数を指定
-4. 任意で地図をクリックして開始地点を指定
-5. 「巡回ルートを生成」
-6. 統合KMZまたは成果物一式ZIPをダウンロード
-
-注意：GitHub PagesだけではPythonのルート計算エンジンを実行できないため、v0.4.0はPC上で動くローカルWebアプリです。将来の公開版はAPIサーバーを別途配置します。
-
-## 公開版（v0.5.0）: GitHub Pages + APIサーバー
-
-構成は次の2層です。
-
-- `docs/`: GitHub Pagesで配信する静的フロントエンド
-- `src/posting_navigator/webapp.py`: Render等で動かすPython API
-
-### 1. APIをRenderへ公開
-
-1. このリポジトリをGitHubへpush
-2. Renderで「Blueprint」を作成し、リポジトリの`render.yaml`を選択
-3. デプロイ後のURL（例: `https://posting-navigator-api.onrender.com`）を控える
-4. Render環境変数`ALLOWED_ORIGINS`をGitHub PagesのURLに変更
-
-### 2. GitHub Pagesを接続
-
-`docs/config.js`を編集します。
-
-```js
-window.POSTING_NAVIGATOR_API = 'https://実際のAPI名.onrender.com';
-```
-
-GitHubの Settings → Pages → Source で「GitHub Actions」を選択します。mainへpushすると`.github/workflows/pages.yml`が自動公開します。
-
-### 3. 接続確認
-
-APIの`/api/health`が`status: ok`を返し、Pages画面下部の「接続先API」に公開URLが表示されれば接続済みです。
-
-### 注意
-
-Renderの無料枠では休止後の初回起動に時間がかかる場合があります。また、生成ファイルはAPIサーバーの一時ディスクに保存されるため、生成直後にダウンロードしてください。本格運用では永続ストレージまたはS3互換ストレージへの移行を推奨します。
+実OSM以外を許可しない場合は `--no-offline-fallback` を追加します。実運用時は `summary.json` の `data_mode` が `osm` であることを確認してください。

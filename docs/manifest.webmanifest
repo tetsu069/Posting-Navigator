@@ -1,0 +1,14 @@
+{
+  "name": "Posting Navigator",
+  "short_name": "PostingNav",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#edf2f7",
+  "theme_color": "#0f172a",
+  "description": "ポスティング巡回ルート生成・GPS進捗管理・チーム共有",
+  "icons": [
+    {"src":"icons/icon-192.png","sizes":"192x192","type":"image/png"},
+    {"src":"icons/icon-512.png","sizes":"512x512","type":"image/png"}
+  ]
+}
