@@ -21,11 +21,13 @@ function setStartPoint(lat,lon,{center=false}={}){
 }
 function setStartPickMode(on){state.startPickMode=!!on;const b=$('pickStart');if(b){b.classList.toggle('active',state.startPickMode);b.textContent=state.startPickMode?'地図上の開始地点をクリックしてください':'地図で開始地点を指定'}map.getContainer().classList.toggle('start-pick-mode',state.startPickMode)}
 map.on('click',e=>{
-  // 通常の地図操作では開始地点を変更しない。明示的な設定モードのときだけ1回反映する。
-  if(!state.startPickMode)return;
+  // 最初の1クリックだけは、その地点を開始地点として自動設定する。
+  // 2回目以降の通常クリックでは開始地点を動かさない。変更したい場合だけ明示設定モードを使う。
+  const hasStartPoint=!!state.layers.start;
+  if(hasStartPoint && !state.startPickMode)return;
   setStartPoint(e.latlng.lat,e.latlng.lng);
-  setStartPickMode(false);
-  status('status','開始地点を設定しました。','success');
+  if(state.startPickMode)setStartPickMode(false);
+  status('status',hasStartPoint?'開始地点を変更しました。':'開始地点を設定しました。以後、通常クリックでは移動しません。','success');
 });
 $('pickStart').onclick=()=>setStartPickMode(!state.startPickMode);
 $('useCurrent').onclick=()=>navigator.geolocation?.getCurrentPosition(p=>{const {latitude,longitude}=p.coords;setStartPoint(latitude,longitude,{center:true})},e=>status('status',`現在地を取得できません: ${e.message}`,'error'),{enableHighAccuracy:true});
