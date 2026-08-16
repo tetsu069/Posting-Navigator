@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from .kmz import load_area_from_kmz, write_boundary_geojson, list_area_info_from_kmz
-from .osm import fetch_osm_roads, osm_json_to_lines
+from .osm import fetch_osm_roads, osm_json_to_lines, osm_json_to_mobility_lines
 from .fixture import make_offline_fixture
 from .routing import generate_route, generate_worker_routes
 from .export import write_assignments_csv, write_geojson, write_kml, write_kmz
@@ -21,24 +21,28 @@ def build(args: argparse.Namespace) -> int:
     try:
         data = fetch_osm_roads(boundary, args.cache)
         roads = osm_json_to_lines(data, boundary)
+        mobility_roads = osm_json_to_mobility_lines(data, boundary)
         if not roads:
             raise RuntimeError("境界内の道路が0件です")
+        if not mobility_roads:
+            mobility_roads = list(roads)
     except Exception as exc:
         if not args.offline_fallback:
             raise
         mode = "offline-fixture"
         print(f"[WARN] OSM取得失敗。オフラインフィクスチャで継続: {exc}")
         roads = make_offline_fixture(boundary)
+        mobility_roads = list(roads)
 
     start_point = (args.start_lon, args.start_lat) if args.start_lon is not None and args.start_lat is not None else None
-    route = generate_route(roads, start_point=start_point)
+    route = generate_route(roads, start_point=start_point, connector_roads=mobility_roads)
     route["data_mode"] = mode
     route["worker_count"] = args.workers
     area_info = list_area_info_from_kmz(args.kmz).get(args.area, {})
     households = area_info.get("households")
     route["households"] = households
     route["assignment_mode"] = "geographic-balanced"
-    route["assignments"] = generate_worker_routes(boundary, roads, args.workers, start_point=start_point, households=households)
+    route["assignments"] = generate_worker_routes(boundary, roads, args.workers, start_point=start_point, households=households, connector_roads=mobility_roads)
     if args.workers > 1:
         route["route_length_m"] = round(sum(a["length_m"] for a in route["assignments"]), 1)
     kml = write_kml(args.area, boundary, roads, route, out / "posting_navigator.kml")

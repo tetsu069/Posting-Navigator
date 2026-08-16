@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "posting-navigator"
-version = "1.0.16"
+version = "1.0.17"
 description = "KMZ町丁目境界とOpenStreetMap道路からポスティング巡回ルートを生成するCLI・Webアプリ"
 readme = "README.md"
 requires-python = ">=3.11"

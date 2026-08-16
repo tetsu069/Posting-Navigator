@@ -33,6 +33,14 @@ def overpass_query(poly: Polygon) -> str:
     公園・学校・緑地の園路は必要な移動時だけconnectorとして残す。
     """
     minx, miny, maxx, maxy = poly.bounds
+    # Include a small halo outside the town polygon.  Some in-area streets are
+    # connected only by a junction whose centreline sits a few metres over the
+    # administrative boundary.  v1.0.17 keeps that halo as transfer-only roads.
+    query_buffer_m = float(os.getenv("OVERPASS_CONTEXT_BUFFER_M", "35"))
+    lat0 = (miny + maxy) * 0.5
+    dlat = query_buffer_m / 111_320.0
+    dlon = query_buffer_m / max(1.0, 111_320.0 * math.cos(math.radians(lat0)))
+    minx -= dlon; maxx += dlon; miny -= dlat; maxy += dlat
     bbox = f"{miny:.7f},{minx:.7f},{maxy:.7f},{maxx:.7f}"
     return f'''[out:json][timeout:75];
 (
@@ -53,7 +61,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.0.16 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.0.17 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -138,7 +146,7 @@ def fetch_osm_roads(poly: Polygon, cache_path: str | Path | None = None, timeout
             try:
                 cached = json.loads(cache_path.read_text(encoding="utf-8"))
                 # v1.0.13から建物・公園等のcontext要素が必要。旧道路-onlyキャッシュは使わない。
-                if cached.get("_pn_cache_schema") != 2 or "data" not in cached:
+                if cached.get("_pn_cache_schema") != 3 or "data" not in cached:
                     raise ValueError("old cache schema")
                 return _validate_overpass_json(cached["data"], "cache")
             except Exception:
@@ -165,7 +173,7 @@ def fetch_osm_roads(poly: Polygon, cache_path: str | Path | None = None, timeout
             if cache_path:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
-                tmp.write_text(json.dumps({"_pn_cache_schema": 2, "data": data}, ensure_ascii=False), encoding="utf-8")
+                tmp.write_text(json.dumps({"_pn_cache_schema": 3, "data": data}, ensure_ascii=False), encoding="utf-8")
                 tmp.replace(cache_path)
             return data
         except Exception as exc:  # 次のミラーへフェイルオーバー
@@ -408,14 +416,19 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
     roads: list[dict] = []
     candidate_buffer_m = float(os.getenv("BOUNDARY_ROAD_BUFFER_M", "8"))
     walk_tolerance_m = float(os.getenv("BOUNDARY_WALK_TOLERANCE_M", "1.5"))
+    connector_buffer_m = float(os.getenv("CONNECTOR_ROAD_BUFFER_M", "20"))
     candidate_buffer_m = max(walk_tolerance_m, candidate_buffer_m)
+    connector_buffer_m = max(candidate_buffer_m, connector_buffer_m)
     walk_tolerance_m = max(0.0, walk_tolerance_m)
 
     fwd, inv = _metric_transformers(boundary)
     boundary_m = transform(fwd, boundary)
     boundary_line_m = boundary_m.boundary
     context_index = _context_index(data, fwd)
-    candidate_region = boundary_m.buffer(candidate_buffer_m)
+    # posting candidate band is 8 m by default; mobility can use a slightly
+    # wider 20 m halo, but those extra pieces are connector-only.
+    candidate_region = boundary_m.buffer(connector_buffer_m)
+    posting_candidate_region = boundary_m.buffer(candidate_buffer_m)
     safe_region = boundary_m.buffer(walk_tolerance_m)
 
     for element in data.get("elements", []):
@@ -433,7 +446,10 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
             continue
 
         line_m = transform(fwd, LineString(coords))
-        candidate = line_m.intersection(candidate_region)
+        # Strict distribution layer: only the safe in-area geometry plus truly
+        # boundary-parallel roads are returned here.  Transfer-only roads are
+        # produced separately by osm_json_to_mobility_lines().
+        candidate = line_m.intersection(posting_candidate_region)
         accepted: list[LineString] = []
         for cand in _as_lines(candidate):
             inside = cand.intersection(safe_region)
@@ -461,9 +477,58 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
                 "access": tags.get("access", ""), "service": tags.get("service", ""),
                 "foot": tags.get("foot", ""), "boundary_near": not geom.within(boundary),
                 "posting_target": posting_target,
+                "connector_only": False,
                 "residential_score": round(residential_score, 3),
                 "nonresidential_overlap": round(nonres_overlap, 3),
                 "nearest_building_m": round(nearest_building_m, 1),
+                "geometry": geom,
+            })
+    return roads
+
+
+def osm_json_to_mobility_lines(data: dict, boundary: Polygon) -> list[dict]:
+    """Return the walking-connector road layer for routing transfers.
+
+    v1.0.17 separates *where we distribute* from *where we are allowed to walk*.
+    This layer keeps traversable OSM highways inside the town plus a small
+    boundary halo (20 m by default), including parks/footways and short outward
+    boundary stubs.  Every returned edge is connector-only; the strict posting
+    layer from osm_json_to_lines() remains unchanged.
+    """
+    connector_buffer_m = max(0.0, float(os.getenv("CONNECTOR_ROAD_BUFFER_M", "20")))
+    fwd, inv = _metric_transformers(boundary)
+    boundary_m = transform(fwd, boundary)
+    mobility_region = boundary_m.buffer(connector_buffer_m)
+    roads: list[dict] = []
+    for element in data.get("elements", []):
+        if element.get("type") != "way" or "geometry" not in element:
+            continue
+        tags = element.get("tags", {})
+        highway = tags.get("highway", "")
+        if not highway or highway in EXCLUDED_HIGHWAYS:
+            continue
+        access = tags.get("access", "")
+        if access in {"no", "private"} and highway not in {"pedestrian", "footway", "path", "steps"}:
+            continue
+        coords = [(pt["lon"], pt["lat"]) for pt in element["geometry"] if "lon" in pt and "lat" in pt]
+        if len(coords) < 2:
+            continue
+        try:
+            clipped = transform(fwd, LineString(coords)).intersection(mobility_region)
+        except Exception:
+            continue
+        for geom_m in _as_lines(clipped):
+            if geom_m.length < 0.5:
+                continue
+            geom = transform(inv, geom_m)
+            roads.append({
+                "id": element.get("id"), "highway": highway, "name": tags.get("name", ""),
+                "access": access, "service": tags.get("service", ""), "foot": tags.get("foot", ""),
+                "boundary_near": not geom.within(boundary),
+                "posting_target": False, "connector_only": True,
+                # Mobility edges are not distribution targets. The default score is
+                # deliberately neutral; build_graph adds a connector-only penalty.
+                "residential_score": 0.35, "nonresidential_overlap": 0.0,
                 "geometry": geom,
             })
     return roads

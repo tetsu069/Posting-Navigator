@@ -1,12 +1,14 @@
-# Posting Navigator v1.0.16
+# Posting Navigator v1.0.17
 
-## v1.0.16 修正
-- Renderログで特定した `routing.py::_source_for_segment()` の全道路総当たりを廃止
-- Shapely `STRtree.query_nearest()` で各noded segmentの元道路を最近傍検索
-- connector道路と担当道路の完全重複GeometryをWKB単位で除去し、`unary_union` とSTRtreeへの二重投入を抑制
-- connector graph構築でも同じ空間索引を利用し、`全セグメント × 全道路 × distance()` を発生させない
-- 160本の密集道路を含む回帰テストを追加
-- Render Free 512MBを前提に、前版のcomponent-order軽量化・住宅文脈STRtree化を維持
+## v1.0.17 修正
+- **配布対象道路**と**移動に使える道路**を完全に2層化。
+- 配布対象は従来どおり町丁目内＋境界平行道路だけ。エリア外向き枝道を配布対象にはしない。
+- 移動用ネットワークは町丁目境界の外側20mまでの実在OSM道路を保持し、分断された巡回成分の接続にだけ使用。
+- Overpass取得範囲を境界外35mまで拡張し、境界直外の交差点・接続道路も取得。
+- 移動区間は `posting_target=False / connector_only=True` として通常巡回と分離。
+- 実道路で接続不能な場合は従来どおり偽の直線を作らずエラー停止。
+- OSMキャッシュスキーマを更新し、旧キャッシュを自動破棄。
+- v1.0.16までのSTRtree軽量化・Render Free向けメモリ対策を維持。
 
 # Posting Navigator v1.0.3
 

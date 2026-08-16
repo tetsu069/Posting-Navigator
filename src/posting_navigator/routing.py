@@ -29,7 +29,7 @@ HIGHWAY_PENALTY = {
 def _dist_m(a: tuple[float, float], b: tuple[float, float]) -> float:
     """Fast local distance in metres for town-scale routing.
 
-    v1.0.16 deliberately avoids pyproj.Geod.inv() here.  This helper is called
+    v1.0.17 deliberately avoids pyproj.Geod.inv() here.  This helper is called
     tens of thousands of times while ordering disconnected road components and
     while building navigation legs.  For distances of a few kilometres the
     equirectangular approximation is far more than accurate enough for routing
@@ -73,7 +73,7 @@ def _snap(p: tuple[float, float], precision: int = 6) -> tuple[float, float]:
 class _RoadSourceIndex:
     """Spatial index used while reconstructing graph edges after noding.
 
-    v1.0.16 searched *every* road with geometry.distance(midpoint) for every
+    v1.0.17 searched *every* road with geometry.distance(midpoint) for every
     tiny segment emitted by unary_union().  Dense blocks can create thousands
     of segments, so that O(segments x roads) scan becomes both CPU- and
     allocation-heavy.  STRtree.query_nearest() returns the nearest geometry
@@ -169,6 +169,7 @@ def _simplify_degree_two(graph: nx.MultiGraph) -> nx.MultiGraph:
                 "highway": highway, "name": name, "osm_id": osm_id,
                 "boundary_near": bool(d1.get("boundary_near") or d2.get("boundary_near")),
                 "posting_target": bool(d1.get("posting_target", True) and d2.get("posting_target", True)),
+                "connector_only": bool(d1.get("connector_only") or d2.get("connector_only")),
                 "residential_score": max(float(d1.get("residential_score", 0.5)), float(d2.get("residential_score", 0.5))),
                 "nonresidential_overlap": max(float(d1.get("nonresidential_overlap", 0.0)), float(d2.get("nonresidential_overlap", 0.0))),
                 "geometry": LineString(coords),
@@ -208,12 +209,17 @@ def build_graph(roads: list[dict], *, simplify: bool = True) -> nx.MultiGraph:
             residential_score = float(source.get("residential_score", 0.5))
             nonres_overlap = float(source.get("nonresidential_overlap", 0.0))
             posting_target = bool(source.get("posting_target", True))
+            connector_only = bool(source.get("connector_only", False))
             # 余分な往復/成分間移動では住宅沿いを優先し、公園等connector-only道路を強く避ける。
             density_factor = 1.30 - 0.50 * max(0.0, min(1.0, residential_score))
             if nonres_overlap >= 0.45:
                 density_factor *= 2.5
             if not posting_target:
                 density_factor *= 4.0
+            if connector_only:
+                # Boundary-outside stubs exist only to make a real walking connection.
+                # Strongly discourage them unless they are genuinely needed.
+                density_factor *= 2.0
             graph.add_edge(
                 u, v,
                 length=length,
@@ -223,6 +229,7 @@ def build_graph(roads: list[dict], *, simplify: bool = True) -> nx.MultiGraph:
                 osm_id=source.get("id"),
                 boundary_near=bool(source.get("boundary_near", False)),
                 posting_target=posting_target,
+                connector_only=connector_only,
                 residential_score=residential_score,
                 nonresidential_overlap=nonres_overlap,
                 geometry=segment,
@@ -269,7 +276,7 @@ def _component_order(graph: nx.MultiGraph, start_point: tuple[float, float] | No
 
     v1.0.14 repeatedly evaluated every node of every remaining component with
     pyproj.Geod.inv().  On dense Tokyo blocks this became the dominant hot path
-    and could terminate the Render Free worker.  v1.0.16 caches each component
+    and could terminate the Render Free worker.  v1.0.17 caches each component
     bbox and only performs node-level nearest checks for the few components whose
     bboxes are already closest to the current position.
     """
@@ -331,6 +338,7 @@ def _step(u, v, data: dict, seq: int, *, transfer: bool = False, component: int 
         "osm_id": data.get("osm_id") if data else None,
         "boundary_near": bool(data.get("boundary_near")) if data else False,
         "posting_target": bool(data.get("posting_target", True)) if data else True,
+        "connector_only": bool(data.get("connector_only", False)) if data else False,
         "residential_score": float(data.get("residential_score", 0.5)) if data else 0.5,
         "duplicated": bool(data.get("duplicated")) if data else False,
         "transfer": transfer,
@@ -752,7 +760,8 @@ def partition_worker_areas(boundary, roads: list[dict], workers: int) -> list[di
 
 def generate_worker_routes(boundary, roads: list[dict], workers: int,
                            start_point: tuple[float, float] | None = None,
-                           households: int | None = None) -> list[dict]:
+                           households: int | None = None,
+                           connector_roads: list[dict] | None = None) -> list[dict]:
     """Generate an independent Chinese-Postman route for each geographic worker area."""
     target_roads = [r for r in roads if r.get("posting_target", True)]
     parts = partition_worker_areas(boundary, target_roads, workers)
@@ -760,7 +769,10 @@ def generate_worker_routes(boundary, roads: list[dict], workers: int,
     total_source = 0.0
     generated = []
     for part in parts:
-        wr = generate_route(part["roads"], start_point=start_point, connector_roads=roads)
+        wr = generate_route(
+            part["roads"], start_point=start_point,
+            connector_roads=(connector_roads if connector_roads is not None else roads),
+        )
         total_source += float(wr.get("source_length_m", 0))
         generated.append((part, wr))
     for part, wr in generated:
