@@ -9,6 +9,7 @@ from pathlib import Path
 import requests
 from shapely.geometry import LineString, Polygon
 from shapely.ops import linemerge, transform, unary_union
+from shapely.strtree import STRtree
 from pyproj import CRS, Transformer
 
 # OpenStreetMap Wiki の Public Overpass API instances (2026-08 確認) を基準にする。
@@ -52,7 +53,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.0.13 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.0.14 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -267,53 +268,111 @@ def _element_polygons(element: dict) -> list[Polygon]:
     return []
 
 
-def _context_unions(data: dict, fwd):
-    buildings = []
-    nonres = []
+class _ContextIndex:
+    """住宅/非住宅ポリゴンの軽量空間インデックス。
+
+    v1.0.14: 全建物を unary_union して各道路との distance/intersection を総当たり
+    する方式を廃止。STRtree で道路近傍だけを候補化してから厳密計算する。
+    Render Free (512MB) でも大規模町丁目を処理できることを優先する。
+    """
+
+    __slots__ = ("buildings", "nonres", "building_tree", "nonres_tree")
+
+    def __init__(self, buildings: list, nonres: list):
+        self.buildings = buildings
+        self.nonres = nonres
+        self.building_tree = STRtree(buildings) if buildings else None
+        self.nonres_tree = STRtree(nonres) if nonres else None
+
+    @staticmethod
+    def _indices(tree, query_geom) -> list[int]:
+        if tree is None or query_geom.is_empty:
+            return []
+        # Shapely 2.x の STRtree.query は ndarray[int] を返す。
+        return [int(i) for i in tree.query(query_geom)]
+
+    def nearby_buildings(self, geom, radius_m: float = 50.0) -> list:
+        if self.building_tree is None:
+            return []
+        # 住宅判定で必要なのは最大45mまで。50m envelope で候補だけ絞る。
+        search = geom.buffer(radius_m, cap_style=2).envelope
+        return [self.buildings[i] for i in self._indices(self.building_tree, search)]
+
+    def intersecting_nonres(self, geom) -> list:
+        if self.nonres_tree is None:
+            return []
+        return [self.nonres[i] for i in self._indices(self.nonres_tree, geom.envelope)]
+
+
+def _context_index(data: dict, fwd) -> _ContextIndex:
+    buildings: list = []
+    nonres: list = []
     for element in data.get("elements", []):
         tags = element.get("tags", {})
-        polys = _element_polygons(element)
-        if not polys:
-            continue
-        if tags.get("building") and tags.get("building") != "no":
-            buildings.extend(transform(fwd, p) for p in polys)
+        is_building = bool(tags.get("building") and tags.get("building") != "no")
         is_nonres = (
             tags.get("leisure") in {"park", "garden", "playground", "pitch", "sports_centre"}
             or tags.get("landuse") in {"grass", "recreation_ground", "forest", "cemetery", "allotments"}
             or tags.get("amenity") in {"school", "kindergarten", "university", "college"}
         )
-        if is_nonres:
-            nonres.extend(transform(fwd, p) for p in polys)
-    return (
-        unary_union(buildings) if buildings else None,
-        unary_union(nonres) if nonres else None,
-    )
+        if not is_building and not is_nonres:
+            continue
+        for p in _element_polygons(element):
+            try:
+                pm = transform(fwd, p)
+            except Exception:
+                continue
+            if pm.is_empty:
+                continue
+            if is_building:
+                buildings.append(pm)
+            if is_nonres:
+                nonres.append(pm)
+    return _ContextIndex(buildings, nonres)
 
 
-def _road_context_score(geom_m: LineString, highway: str, service: str, building_union, nonres_union) -> tuple[bool, float, float, float]:
+def _road_context_score(geom_m: LineString, highway: str, service: str, context: _ContextIndex) -> tuple[bool, float, float, float]:
     """(posting_target, residential_score, nonres_overlap, nearest_building_m) を返す。
 
-    公園等の園路は配布対象から外すが connector として形状自体は保持する。
-    住宅へのアクセスがある道は建物近接判定により残す。
+    v1.0.14 は STRtree で近傍候補だけを調べる。全建物 union と全道路×全建物の
+    distance/intersection は行わない。
     """
-    nearest = 9999.0 if building_union is None else float(building_union.distance(geom_m))
+    buildings = context.nearby_buildings(geom_m, 50.0)
+    if not buildings:
+        nearest = 9999.0
+    else:
+        nearest = min(float(b.distance(geom_m)) for b in buildings)
+
     corridor = geom_m.buffer(25.0, cap_style=2)
-    if building_union is None or corridor.is_empty or corridor.area <= 0:
+    if not buildings or corridor.is_empty or corridor.area <= 0:
         cover = 0.0
     else:
-        try:
-            cover = float(building_union.intersection(corridor).area / corridor.area)
-        except Exception:
-            cover = 0.0
-    if nonres_union is None or geom_m.length <= 0:
+        # 建物同士は通常重ならないため、unionを作らず交差面積を合計する。
+        # 万一重複しても住宅スコアは最終的に1へclipされる。
+        inter_area = 0.0
+        for b in buildings:
+            if not b.intersects(corridor):
+                continue
+            try:
+                inter_area += float(b.intersection(corridor).area)
+            except Exception:
+                pass
+        cover = min(1.0, inter_area / corridor.area)
+
+    nonres_candidates = context.intersecting_nonres(geom_m)
+    if not nonres_candidates or geom_m.length <= 0:
         nonres_overlap = 0.0
     else:
-        try:
-            nonres_overlap = float(nonres_union.intersection(geom_m).length / geom_m.length)
-        except Exception:
-            nonres_overlap = 0.0
+        overlap_len = 0.0
+        for p in nonres_candidates:
+            if not p.intersects(geom_m):
+                continue
+            try:
+                overlap_len += float(p.intersection(geom_m).length)
+            except Exception:
+                pass
+        nonres_overlap = min(1.0, overlap_len / geom_m.length)
 
-    # 建物近接と25mコリドー内建物面積から0..1の住宅スコアを作る。
     if nearest <= 8:
         proximity = 1.0
     elif nearest <= 18:
@@ -328,22 +387,18 @@ def _road_context_score(geom_m: LineString, highway: str, service: str, building
 
     low_value_types = {"footway", "path", "pedestrian", "steps", "cycleway"}
     posting_target = True
-    # 公園・学校・緑地内の園路で、近くに配布先建物が無いものは巡回必須から外す。
     if highway in low_value_types and nonres_overlap >= 0.45 and nearest > 28.0:
         posting_target = False
-    # 公園ポリゴンが未整備でも、住宅から遠い歩行者専用路は原則connector扱い。
     if highway in {"footway", "path", "steps", "cycleway"} and nearest > 45.0 and residential_score < 0.18:
         posting_target = False
-    # 駐車場内を何周もするのを防ぐ。建物入口に近い場合だけ対象として残す。
     if highway == "service" and service in {"parking_aisle", "parking"} and nearest > 18.0:
         posting_target = False
     return posting_target, residential_score, nonres_overlap, nearest
 
-
 def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
     """Overpass道路を町丁目内の巡回可能な形状へ切り出す。
 
-    v1.0.13:
+    v1.0.14:
     - 境界道路を『探す』8m帯と、実際に『歩いてよい』1.5m帯を分離。
     - 建物密度と公園・学校・緑地ポリゴンを使い、配布先のない園路をconnector-only化。
     - 通常道路は町丁目＋1.5mでクリップ。
@@ -359,7 +414,7 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
     fwd, inv = _metric_transformers(boundary)
     boundary_m = transform(fwd, boundary)
     boundary_line_m = boundary_m.boundary
-    building_union_m, nonres_union_m = _context_unions(data, fwd)
+    context_index = _context_index(data, fwd)
     candidate_region = boundary_m.buffer(candidate_buffer_m)
     safe_region = boundary_m.buffer(walk_tolerance_m)
 
@@ -398,7 +453,7 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
             if geom_m.length < 0.5:
                 continue
             posting_target, residential_score, nonres_overlap, nearest_building_m = _road_context_score(
-                geom_m, highway, tags.get("service", ""), building_union_m, nonres_union_m
+                geom_m, highway, tags.get("service", ""), context_index
             )
             geom = transform(inv, geom_m)
             roads.append({

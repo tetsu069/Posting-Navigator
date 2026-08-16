@@ -116,13 +116,13 @@ def public_file(filename: str):
 
 @app.get("/api/health")
 def api_health():
-    return jsonify(status="ok", service="posting-navigator-api", version="1.0.13")
+    return jsonify(status="ok", service="posting-navigator-api", version="1.0.14")
 
 
 @app.get("/api/config")
 def api_config():
     return jsonify(
-        version="1.0.13",
+        version="1.0.14",
         google_client_id=os.getenv("GOOGLE_CLIENT_ID", ""),
         gps_threshold_m=float(os.getenv("GPS_THRESHOLD_M", "18")),
         sync_interval_ms=int(os.getenv("SYNC_INTERVAL_MS", "5000")),
@@ -195,7 +195,7 @@ def api_areas():
 
 @app.post("/api/build")
 def api_build():
-    # v1.0.13: Build requests are self-contained.  The browser sends the KMZ
+    # v1.0.14: Build requests are self-contained.  The browser sends the KMZ
     # again together with the currently selected area, so a Render restart or
     # cleanup between /api/areas and /api/build cannot invalidate the job.
     is_multipart = bool(request.files) or request.mimetype == "multipart/form-data"
