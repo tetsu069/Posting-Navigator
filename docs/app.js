@@ -1,13 +1,19 @@
 const configured=(window.POSTING_NAVIGATOR_API||'').replace(/\/$/,'');
 const API=configured || location.origin;
 const $=id=>document.getElementById(id);
-const state={uploadId:null,jobId:null,geojson:null,areaGeojson:null,summary:null,projectId:null,shareCode:null,workerId:1,watchId:null,current:null,completed:new Set(),segments:[],segmentLengths:[],layers:{},syncTimer:null,config:{gps_threshold_m:18,sync_interval_ms:5000},areaInfo:{},fieldGuideLeg:0,lastPosition:null,sessionToken:localStorage.getItem('pn_session')||'',user:null,navLegs:[],startPickMode:false,activeGuideLeg:0};
+const state={uploadId:null,jobId:null,geojson:null,areaGeojson:null,summary:null,projectId:null,shareCode:null,workerId:1,watchId:null,current:null,completed:new Set(),segments:[],segmentLengths:[],layers:{},syncTimer:null,config:{gps_threshold_m:18,sync_interval_ms:5000},areaInfo:{},fieldGuideLeg:0,lastPosition:null,sessionToken:localStorage.getItem('pn_session')||'',user:null,navLegs:[],startPickMode:false,activeGuideLeg:0,forceOsmRefresh:false};
 const map=L.map('map').setView([35.7005,139.6925],16);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'© OpenStreetMap contributors'}).addTo(map);
 
 function status(id,text,type=''){const el=$(id);el.textContent=text;el.className='status'+(type?' '+type:'')}
 function authHeaders(extra={}){return state.sessionToken?{...extra,Authorization:`Bearer ${state.sessionToken}`} : extra}
 async function api(path,opts={}){const r=await fetch(`${API}${path}`,{...opts,headers:authHeaders(opts.headers||{})});let j={};try{j=await r.json()}catch{}if(!r.ok)throw Error(j.error||`${r.status} ${r.statusText}`);return j}
+async function osmDb(){return new Promise((resolve,reject)=>{const req=indexedDB.open('posting-navigator-osm',1);req.onupgradeneeded=()=>{if(!req.result.objectStoreNames.contains('snapshots'))req.result.createObjectStore('snapshots')};req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error)})}
+async function getBrowserOsmCache(area){if(!area||!('indexedDB'in window))return null;try{const db=await osmDb();return await new Promise((resolve,reject)=>{const tx=db.transaction('snapshots','readonly'),req=tx.objectStore('snapshots').get(area);req.onsuccess=()=>resolve(req.result||null);req.onerror=()=>reject(req.error)})}catch{return null}}
+async function putBrowserOsmCache(area,blob){if(!area||!blob||!('indexedDB'in window))return;try{const db=await osmDb();await new Promise((resolve,reject)=>{const tx=db.transaction('snapshots','readwrite');tx.objectStore('snapshots').put({blob,updatedAt:Date.now()},area);tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)})}catch{}}
+async function restoreBrowserOsmCache(area){const saved=await getBrowserOsmCache(area);if(!saved?.blob)return false;const fd=new FormData();fd.append('area',area);fd.append('cache',saved.blob,'osm_cache.json');try{const r=await fetch(`${API}/api/osm-cache/import`,{method:'POST',body:fd,headers:authHeaders()});return r.ok}catch{return false}}
+async function saveServerOsmCacheToBrowser(area){try{const r=await fetch(`${API}/api/osm-cache/export?area=${encodeURIComponent(area)}`,{headers:authHeaders()});if(!r.ok)return false;const blob=await r.blob();await putBrowserOsmCache(area,blob);return true}catch{return false}}
+async function updateOsmCacheStatus(){const el=$('osmCacheStatus'),area=$('area')?.value;if(!el||!area||$('area')?.disabled){if(el){el.textContent='未保存';el.className=''}return}const local=await getBrowserOsmCache(area);if(local?.blob){el.textContent='この端末に保存済み';el.className='saved';return}try{const j=await api(`/api/osm-cache/status?area=${encodeURIComponent(area)}`);if(j.exists){el.textContent='Renderに一時保存済み';el.className='server'}else{el.textContent='初回取得が必要';el.className=''}}catch{el.textContent='状態不明';el.className=''}}
 function activateTab(name){document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));document.querySelectorAll('.tabpane').forEach(x=>x.classList.toggle('active',x.id===`tab-${name}`));setTimeout(()=>map.invalidateSize(),50)}
 document.querySelectorAll('.tab').forEach(x=>x.onclick=()=>{activateTab(x.dataset.tab);if(x.dataset.tab==='field'&&state.geojson){const wid=+(($('fieldWorker')?.value)||state.workerId||1);loadWorker(wid)}});
 
@@ -32,10 +38,10 @@ map.on('click',e=>{
 $('pickStart').onclick=()=>setStartPickMode(!state.startPickMode);
 $('useCurrent').onclick=()=>navigator.geolocation?.getCurrentPosition(p=>{const {latitude,longitude}=p.coords;setStartPoint(latitude,longitude,{center:true})},e=>status('status',`現在地を取得できません: ${e.message}`,'error'),{enableHighAccuracy:true});
 
-$('kmz').onchange=async()=>{const f=$('kmz').files[0];if(!f)return;status('status','KMZを解析中…');$('build').disabled=true;const fd=new FormData();fd.append('kmz',f);try{const r=await fetch(`${API}/api/areas`,{method:'POST',body:fd,headers:authHeaders()});const j=await r.json();if(!r.ok)throw Error(j.error);state.uploadId=j.upload_id;state.areaGeojson=j.area_geojson||null;state.areaInfo=j.area_info||{};$('area').innerHTML=j.areas.map(x=>`<option>${escapeHtml(x)}</option>`).join('');$('area').disabled=false;$('build').disabled=false;renderAreaBoundaries(true);renderHouseholdInfo();status('status',`${j.areas.length}件の区画を読み込みました。地図に町丁目境界を表示しています。`,'success')}catch(e){status('status',e.message,'error')}};
+$('kmz').onchange=async()=>{const f=$('kmz').files[0];if(!f)return;status('status','KMZを解析中…');$('build').disabled=true;const fd=new FormData();fd.append('kmz',f);try{const r=await fetch(`${API}/api/areas`,{method:'POST',body:fd,headers:authHeaders()});const j=await r.json();if(!r.ok)throw Error(j.error);state.uploadId=j.upload_id;state.areaGeojson=j.area_geojson||null;state.areaInfo=j.area_info||{};$('area').innerHTML=j.areas.map(x=>`<option>${escapeHtml(x)}</option>`).join('');$('area').disabled=false;$('build').disabled=false;$('refreshOsm').disabled=false;renderAreaBoundaries(true);renderHouseholdInfo();updateOsmCacheStatus();status('status',`${j.areas.length}件の区画を読み込みました。地図に町丁目境界を表示しています。`,'success')}catch(e){status('status',e.message,'error')}};
 
 
-$('area').onchange=()=>{renderAreaBoundaries(true);renderHouseholdInfo()};
+$('area').onchange=()=>{renderAreaBoundaries(true);renderHouseholdInfo();updateOsmCacheStatus()};
 
 function renderAreaBoundaries(fitSelected=false){
   if(state.layers.areas){state.layers.areas.remove();state.layers.areas=null}
@@ -66,7 +72,24 @@ function currentHouseholds(){const v=state.areaInfo?.[$('area').value]?.househol
 function renderHouseholdInfo(){const n=currentHouseholds(),box=$('householdBox');if(!box)return;if(n==null){box.classList.add('hidden');return}box.classList.remove('hidden');$('householdTotal').textContent=n.toLocaleString('ja-JP')+'世帯'}
 function updateHouseholdProgress(pct){const total=currentHouseholds(),box=$('householdProgress');if(!box||total==null){box?.classList.add('hidden');return}const done=Math.max(0,Math.min(total,Math.round(total*(pct||0)/100)));box.classList.remove('hidden');$('householdDone').textContent=done.toLocaleString('ja-JP')+'世帯';$('householdRemain').textContent=(total-done).toLocaleString('ja-JP')+'世帯'}
 
-$('build').onclick=async()=>{status('status','道路取得・巡回計算・KML生成を実行中…');$('build').disabled=true;$('downloads').classList.add('hidden');try{const j=await api('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({upload_id:state.uploadId,area:$('area').value,workers:1,start_lat:$('lat').value,start_lon:$('lon').value,offline_fallback:$('fallback').checked})});state.jobId=j.job_id;state.geojson=j.geojson;state.summary=j.summary;renderGeneratedMap();renderMetrics();renderDownloads();status('status',`生成完了（道路データ: ${j.summary.data_mode}）`,'success');await createSharedProject();prepareWorkerUI();activateTab('build')}catch(e){status('status',e.message,'error')}finally{$('build').disabled=false}};
+async function runRouteBuild(forceRefresh=false){
+  const area=$('area').value;
+  status('status',forceRefresh?'最新OSMを取得して巡回計算中…':'保存済みOSMを確認して巡回計算中…');
+  $('build').disabled=true;$('refreshOsm').disabled=true;$('downloads').classList.add('hidden');
+  try{
+    // 更新時も先に端末キャッシュをRenderへ戻す。最新取得が失敗した場合の安全網になる。
+    await restoreBrowserOsmCache(area);
+    const j=await api('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({upload_id:state.uploadId,area,workers:1,start_lat:$('lat').value,start_lon:$('lon').value,offline_fallback:$('fallback').checked,force_osm_refresh:!!forceRefresh})});
+    state.jobId=j.job_id;state.geojson=j.geojson;state.summary=j.summary;renderGeneratedMap();renderMetrics();renderDownloads();
+    const saved=await saveServerOsmCacheToBrowser(area);await updateOsmCacheStatus();
+    const mode=j.summary.data_mode||'osm';
+    const modeText=mode==='osm'?'最新OSM':mode==='osm-cache'?'保存済みOSM':mode==='osm-cache-fallback'?'保存済みOSM（更新失敗のため既存データ）':mode;
+    status('status',`生成完了（道路データ: ${modeText}${saved?'・端末保存済み':''}）`,'success');
+    await createSharedProject();prepareWorkerUI();activateTab('build');
+  }catch(e){status('status',e.message,'error')}finally{$('build').disabled=false;$('refreshOsm').disabled=!state.uploadId}
+}
+$('build').onclick=()=>runRouteBuild(false);
+$('refreshOsm').onclick=()=>runRouteBuild(true);
 
 function routeStepFeatures(){return (state.geojson?.features||[]).filter(f=>f.properties?.kind==='route_step').sort((a,b)=>(a.properties.seq||0)-(b.properties.seq||0))}
 function navigationLegFeatures(){return (state.geojson?.features||[]).filter(f=>f.properties?.kind==='navigation_leg').sort((a,b)=>(a.properties.leg||0)-(b.properties.leg||0))}

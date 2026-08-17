@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import secrets
 import shutil
@@ -18,6 +19,7 @@ from werkzeug.utils import secure_filename
 
 from .kmz import list_areas_from_kmz, list_area_geojson_from_kmz, list_area_info_from_kmz
 from .service import run_build
+from .osm import _validate_overpass_json
 
 BASE = Path.cwd()
 RUNTIME = BASE / "web_runtime"
@@ -25,7 +27,8 @@ UPLOADS = RUNTIME / "uploads"
 JOBS = RUNTIME / "jobs"
 DB_PATH = Path(os.getenv("POSTING_NAV_DB", str(RUNTIME / "posting_navigator.db")))
 DOCS = BASE / "docs"
-for d in (UPLOADS, JOBS, DB_PATH.parent):
+OSM_CACHE = RUNTIME / "cache"
+for d in (UPLOADS, JOBS, DB_PATH.parent, OSM_CACHE):
     d.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__)
@@ -116,13 +119,13 @@ def public_file(filename: str):
 
 @app.get("/api/health")
 def api_health():
-    return jsonify(status="ok", service="posting-navigator-api", version="1.1.3")
+    return jsonify(status="ok", service="posting-navigator-api", version="1.1.5")
 
 
 @app.get("/api/config")
 def api_config():
     return jsonify(
-        version="1.1.3",
+        version="1.1.5",
         google_client_id=os.getenv("GOOGLE_CLIENT_ID", ""),
         gps_threshold_m=float(os.getenv("GPS_THRESHOLD_M", "18")),
         sync_interval_ms=int(os.getenv("SYNC_INTERVAL_MS", "5000")),
@@ -175,6 +178,62 @@ def auth_logout():
     return jsonify(ok=True)
 
 
+
+
+def _osm_cache_path(area: str) -> Path:
+    area = (area or "").strip()
+    digest = hashlib.sha256(area.encode("utf-8")).hexdigest()[:20]
+    return OSM_CACHE / f"area_{digest}.json"
+
+
+def _read_imported_osm(file_storage) -> dict:
+    raw = file_storage.read()
+    if len(raw) > 24 * 1024 * 1024:
+        raise ValueError("OSMキャッシュが大きすぎます")
+    data = json.loads(raw.decode("utf-8"))
+    return _validate_overpass_json(data, "browser-cache")
+
+
+@app.get("/api/osm-cache/status")
+def api_osm_cache_status():
+    area = request.args.get("area", "").strip()
+    if not area:
+        return jsonify(error="町丁目が指定されていません"), 400
+    path = _osm_cache_path(area)
+    if not path.exists():
+        return jsonify(exists=False, area=area)
+    st = path.stat()
+    return jsonify(exists=True, area=area, size=st.st_size, updated_at=int(st.st_mtime))
+
+
+@app.get("/api/osm-cache/export")
+def api_osm_cache_export():
+    area = request.args.get("area", "").strip()
+    if not area:
+        return jsonify(error="町丁目が指定されていません"), 400
+    path = _osm_cache_path(area)
+    if not path.exists():
+        return jsonify(error="保存済みOSMキャッシュがありません"), 404
+    return send_file(path, mimetype="application/json", as_attachment=False, download_name="osm_cache.json")
+
+
+@app.post("/api/osm-cache/import")
+def api_osm_cache_import():
+    area = request.form.get("area", "").strip()
+    cache = request.files.get("cache")
+    if not area or cache is None:
+        return jsonify(error="町丁目またはOSMキャッシュがありません"), 400
+    try:
+        data = _read_imported_osm(cache)
+        path = _osm_cache_path(area)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+        return jsonify(ok=True, area=area, size=path.stat().st_size)
+    except Exception as exc:
+        return jsonify(error=f"OSMキャッシュを復元できません: {exc}"), 400
+
+
 @app.post("/api/areas")
 def api_areas():
     file = request.files.get("kmz")
@@ -218,8 +277,9 @@ def api_build():
         summary = run_build(
             kmz=kmz, area=area, output=out, workers=workers,
             start_lat=start_lat, start_lon=start_lon,
-            cache=RUNTIME / "cache" / f"{area}.json",
+            cache=_osm_cache_path(area),
             offline_fallback=bool(payload.get("offline_fallback", False)),
+            force_osm_refresh=bool(payload.get("force_osm_refresh", False)),
         )
         bundle = out / "posting_navigator_results.zip"
         with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as zf:

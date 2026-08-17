@@ -43,3 +43,12 @@
 
 /* v1.0.9 households */
 .household-box{margin-top:8px;padding:10px 12px;border-radius:12px;background:#f8fafc;border:1px solid #dbe4ee;display:grid;grid-template-columns:1fr auto;gap:2px 10px;align-items:end}.household-box span,.household-progress span{font-size:12px;color:#64748b}.household-box b{font-size:22px;color:#0f172a}.household-box small{grid-column:1/-1;color:#94a3b8}.household-progress{margin-top:10px;padding:10px;border-radius:12px;background:#f8fafc;border:1px solid #dbeafe;display:grid;grid-template-columns:1fr 1fr;gap:8px}.household-progress>div{padding:8px;background:white;border-radius:9px}.household-progress b{display:block;font-size:20px;margin-top:3px}.household-progress small{grid-column:1/-1;color:#64748b;font-size:11px}.household-progress.hidden,.household-box.hidden{display:none!important}
+
+/* v1.1.5 OSM cache */
+.osm-cache-box{margin:12px 0;padding:12px;border:1px solid #dbe3ee;border-radius:12px;background:#f8fafc}
+.osm-cache-box>div:first-child{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+#osmCacheStatus{font-size:.82rem;padding:3px 8px;border-radius:999px;background:#e2e8f0;color:#475569}
+#osmCacheStatus.saved{background:#dcfce7;color:#166534}
+#osmCacheStatus.server{background:#dbeafe;color:#1d4ed8}
+#osmCacheStatus.refreshing{background:#fef3c7;color:#92400e}
+.osm-cache-box button{width:100%;margin-bottom:5px}

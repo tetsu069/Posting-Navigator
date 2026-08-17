@@ -14,7 +14,7 @@
 <div class="app-shell">
   <header class="topbar">
     <div><h1>Posting Navigator</h1><p>ルート作成・GPS進捗・進捗共有</p></div>
-    <div class="top-actions"><span class="badge">v1.1.3</span><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
+    <div class="top-actions"><span class="badge">v1.1.5</span><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
   </header>
 
   <main class="layout">
@@ -39,6 +39,11 @@
         <div class="hint">通常の地図クリックでは開始地点は動きません。開始地点を変更するときだけ下のボタンを使います。</div>
         <div class="row buttons start-buttons"><button id="pickStart" class="secondary">地図で開始地点を指定</button><button id="useCurrent" class="secondary">現在地を開始地点にする</button></div>
 
+        <div class="osm-cache-box">
+          <div><b>OSMデータ</b><span id="osmCacheStatus">未保存</span></div>
+          <button id="refreshOsm" type="button" class="secondary" disabled>OSMデータを更新して再生成</button>
+          <div class="hint">通常は保存済みデータを使うためOverpassへアクセスしません。更新ボタンを押した時だけ最新OSM取得を試します。</div>
+        </div>
         <label class="check"><input id="fallback" type="checkbox"> OSM取得失敗時に確認用データを使用</label>
         <div class="display-settings"><b>ルート表示</b><label class="check"><input id="showArrows" type="checkbox" checked> 選択中の区間だけ進行方向を表示</label><label class="check"><input id="showNumbers" type="checkbox" checked> 選択中の区間番号を表示</label><div class="hint">赤＝全体ルート、青＝いま確認している区間、水色点線＝次の区間。回る順番は下の一覧で1→2→3…と表示します。</div></div>
         <button id="build" disabled>巡回ルートを生成</button>

@@ -42,7 +42,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.1.3 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.1.5 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -112,28 +112,43 @@ def _post_query(session: requests.Session, endpoint: str, query: str, timeout: i
         raise RuntimeError("JSONとして解析できない応答です") from exc
 
 
-def fetch_osm_roads(poly: Polygon, cache_path: str | Path | None = None, timeout: int = 90) -> dict:
+def _load_cache_file(cache_path: Path) -> dict | None:
+    if not cache_path.exists():
+        return None
+    try:
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        return _validate_overpass_json(cached, "cache")
+    except Exception:
+        cache_path.unlink(missing_ok=True)
+        return None
+
+
+def fetch_osm_roads(
+    poly: Polygon,
+    cache_path: str | Path | None = None,
+    timeout: int = 90,
+    *,
+    force_refresh: bool = False,
+    return_source: bool = False,
+):
     """Overpass APIから道路wayを取得する。
 
-    - 有効なローカルキャッシュがあれば優先利用
-    - User-Agent / Referer を付与
-    - 複数の公開Overpassインスタンスへ自動フェイルオーバー
-    - 429 を返した接続先は一定時間クールダウン
-    - 406 の場合のみ raw text/plain POST へ互換フォールバック
+    v1.1.5 では「毎回Overpassへ行かない」を最優先にする。
+    - 通常はローカルキャッシュを即利用する。
+    - 明示的な force_refresh 時だけ最新OSMを取りに行く。
+    - 更新取得に失敗しても既存キャッシュがあればそれを使って継続する。
+    - ``return_source=True`` の場合は (data, source) を返す。
     """
-    if cache_path:
-        cache_path = Path(cache_path)
-        if cache_path.exists():
-            try:
-                cached = json.loads(cache_path.read_text(encoding="utf-8"))
-                return _validate_overpass_json(cached, "cache")
-            except Exception:
-                # 壊れた/旧形式キャッシュは捨てて取り直す。
-                cache_path.unlink(missing_ok=True)
+    cache_file = Path(cache_path) if cache_path else None
+    cached = _load_cache_file(cache_file) if cache_file else None
+    if cached is not None and not force_refresh:
+        return (cached, "cache") if return_source else cached
 
     endpoints_env = os.getenv("OVERPASS_ENDPOINTS", "").strip()
     endpoints = tuple(x.strip() for x in endpoints_env.split(",") if x.strip()) if endpoints_env else DEFAULT_ENDPOINTS
     if not endpoints:
+        if cached is not None:
+            return (cached, "stale-cache") if return_source else cached
         raise RuntimeError("Overpass接続先が設定されていません")
 
     query = overpass_query(poly)
@@ -149,17 +164,21 @@ def fetch_osm_roads(poly: Polygon, cache_path: str | Path | None = None, timeout
             continue
         try:
             data = _post_query(session, endpoint, query, timeout)
-            if cache_path:
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+            if cache_file:
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                tmp = cache_file.with_suffix(cache_file.suffix + ".tmp")
+                # 内部メタデータは保存してもOSM解析には影響しない。取得元確認にも使える。
                 tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-                tmp.replace(cache_path)
-            return data
+                tmp.replace(cache_file)
+            return (data, "fresh") if return_source else data
         except Exception as exc:  # 次のミラーへフェイルオーバー
             errors.append(f"{endpoint}: {exc}")
 
+    if cached is not None:
+        return (cached, "stale-cache") if return_source else cached
+
     raise RuntimeError(
-        "OSM道路取得に失敗しました。公開Overpassが混雑している場合は30秒ほど待って再試行してください。\n"
+        "OSM道路取得に失敗しました。保存済みOSMキャッシュもありません。公開Overpassが復旧後に再試行してください。\n"
         + "\n".join(errors)
     )
 

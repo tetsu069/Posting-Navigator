@@ -10,7 +10,7 @@ services:
       - key: ALLOWED_ORIGINS
         value: https://tetsu069.github.io
       - key: OVERPASS_USER_AGENT
-        value: Posting-Navigator/1.0.3 (+https://tetsu069.github.io/Posting-Navigator/)
+        value: Posting-Navigator/1.1.5 (+https://tetsu069.github.io/Posting-Navigator/)
       - key: OVERPASS_REFERER
         value: https://tetsu069.github.io/Posting-Navigator/
       - key: MAX_UPLOAD_MB

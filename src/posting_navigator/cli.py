@@ -19,7 +19,8 @@ def build(args: argparse.Namespace) -> int:
 
     mode = "osm"
     try:
-        data = fetch_osm_roads(boundary, args.cache)
+        data, cache_source = fetch_osm_roads(boundary, args.cache, force_refresh=bool(getattr(args, "force_osm_refresh", False)), return_source=True)
+        mode = {"fresh": "osm", "cache": "osm-cache", "stale-cache": "osm-cache-fallback"}.get(cache_source, "osm")
         roads = osm_json_to_lines(data, boundary)
         if not roads:
             raise RuntimeError("境界内の道路が0件です")
@@ -67,6 +68,7 @@ def main() -> int:
     p.add_argument("--start-lon", type=float, help="開始地点の経度（最寄り道路ノードへ補正）")
     p.add_argument("--start-lat", type=float, help="開始地点の緯度（最寄り道路ノードへ補正）")
     p.add_argument("--workers", type=int, default=1, help="担当者数。巡回ルートを距離均等に連続分割（既定: 1）")
+    p.add_argument("--force-osm-refresh", action="store_true", help="保存済みOSMキャッシュを無視して最新取得を試す")
     p.set_defaults(func=build)
     args = parser.parse_args()
     return args.func(args)

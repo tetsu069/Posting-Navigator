@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import heapq
+import itertools
 import networkx as nx
 from pyproj import Geod
 from shapely.geometry import LineString, Point
@@ -26,6 +28,84 @@ HIGHWAY_PENALTY = {
     "steps": 1.5,
     "cycleway": 1.3,
 }
+
+EXACT_MATCHING_MAX_NODES = 24
+
+def _nearest_target_path_low_memory(g: nx.MultiGraph, source, targets: set) -> tuple[object, list, float]:
+    """Dijkstra until the first target is settled; keeps only local predecessor state."""
+    if not targets:
+        raise ValueError("ペアリング候補がありません")
+    counter = itertools.count()
+    heap = [(0.0, next(counter), source)]
+    dist = {source: 0.0}
+    prev = {}
+    settled = set()
+    while heap:
+        d, _, u = heapq.heappop(heap)
+        if u in settled:
+            continue
+        settled.add(u)
+        if u in targets:
+            path = [u]
+            cur = u
+            while cur != source:
+                cur = prev[cur]
+                path.append(cur)
+            path.reverse()
+            return u, path, d
+        for v, keyed in g.adj[u].items():
+            if v in settled:
+                continue
+            edge_cost = min(float(data.get("route_cost", data.get("length", 1.0))) for data in keyed.values())
+            nd = d + edge_cost
+            if nd < dist.get(v, math.inf):
+                dist[v] = nd
+                prev[v] = u
+                heapq.heappush(heap, (nd, next(counter), v))
+    raise ValueError("奇数頂点を実道路上でペアリングできません")
+
+def _minimum_pairing_paths(g: nx.MultiGraph, nodes: list) -> list[tuple[object, object, list]]:
+    """Return node pairs and shortest paths without blowing memory on large odd sets.
+
+    For small sets we keep NetworkX's exact minimum-weight perfect matching.  For
+    larger sets we deliberately avoid constructing the O(n^2) complete graph and
+    the Blossom matching state; instead we repeatedly pair a node with its nearest
+    remaining odd node using one Dijkstra result at a time.  This trades a little
+    optimality for bounded memory, which is essential on Render Free (512 MB).
+    """
+    nodes = list(nodes)
+    if len(nodes) % 2:
+        raise ValueError("奇数頂点数が偶数ではありません")
+    if not nodes:
+        return []
+
+    if len(nodes) <= EXACT_MATCHING_MAX_NODES:
+        complete = nx.Graph()
+        paths: dict[tuple, list] = {}
+        for i, u in enumerate(nodes):
+            lengths, all_paths = nx.single_source_dijkstra(g, u, weight="route_cost")
+            for v in nodes[i + 1:]:
+                if v in lengths:
+                    complete.add_edge(u, v, weight=lengths[v])
+                    paths[(u, v)] = all_paths[v]
+                    paths[(v, u)] = list(reversed(all_paths[v]))
+        matching = nx.algorithms.matching.min_weight_matching(complete, weight="weight")
+        if len(matching) * 2 != len(nodes):
+            raise ValueError("奇数頂点を完全にペアリングできません")
+        return [(u, v, paths[(u, v)]) for u, v in matching]
+
+    # Low-memory greedy pairing.  Keep only one Dijkstra table alive at a time.
+    # Choosing the lexicographically smallest node makes results deterministic.
+    remaining = set(nodes)
+    pairs: list[tuple[object, object, list]] = []
+    while remaining:
+        u = min(remaining, key=repr)
+        remaining.remove(u)
+        v, path, _ = _nearest_target_path_low_memory(g, u, remaining)
+        remaining.remove(v)
+        pairs.append((u, v, path))
+    return pairs
+
 
 
 def _dist_m(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -149,18 +229,7 @@ def eulerize_weighted(g: nx.MultiGraph) -> nx.MultiGraph:
     odd = [n for n, degree in g.degree() if degree % 2 == 1]
     if not odd:
         return g
-    complete = nx.Graph()
-    paths: dict[tuple, list] = {}
-    for i, u in enumerate(odd):
-        lengths, all_paths = nx.single_source_dijkstra(g, u, weight="route_cost")
-        for v in odd[i + 1:]:
-            if v in lengths:
-                complete.add_edge(u, v, weight=lengths[v])
-                paths[(u, v)] = all_paths[v]
-                paths[(v, u)] = list(reversed(all_paths[v]))
-    matching = nx.algorithms.matching.min_weight_matching(complete, weight="weight")
-    for u, v in matching:
-        path = paths[(u, v)]
+    for u, v, path in _minimum_pairing_paths(g, odd):
         for a, b in zip(path, path[1:]):
             edge_data = dict(min(g.get_edge_data(a, b).values(), key=lambda d: d.get("route_cost", math.inf)))
             edge_data["duplicated"] = True
@@ -293,18 +362,8 @@ def _eulerize_open(g: nx.MultiGraph, start, end) -> nx.MultiGraph:
     if not toggle:
         return out
     toggle = list(toggle)
-    complete = nx.Graph()
-    paths: dict[tuple, list] = {}
-    for i, u in enumerate(toggle):
-        lengths, all_paths = nx.single_source_dijkstra(out, u, weight="route_cost")
-        for v in toggle[i + 1:]:
-            if v in lengths:
-                complete.add_edge(u, v, weight=lengths[v])
-                paths[(u, v)] = all_paths[v]
-                paths[(v, u)] = list(reversed(all_paths[v]))
-    matching = nx.algorithms.matching.min_weight_matching(complete, weight="weight")
-    for u, v in matching:
-        for a, b in zip(paths[(u, v)], paths[(u, v)][1:]):
+    for u, v, path in _minimum_pairing_paths(out, toggle):
+        for a, b in zip(path, path[1:]):
             edge_data = dict(min(out.get_edge_data(a, b).values(), key=lambda d: d.get("route_cost", math.inf)))
             edge_data["duplicated"] = True
             out.add_edge(a, b, **edge_data)
