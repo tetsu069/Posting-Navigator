@@ -42,7 +42,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.1.5 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.1.7 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -133,7 +133,7 @@ def fetch_osm_roads(
 ):
     """Overpass APIから道路wayを取得する。
 
-    v1.1.5 では「毎回Overpassへ行かない」を最優先にする。
+    v1.1.7 では「毎回Overpassへ行かない」を最優先にする。
     - 通常はローカルキャッシュを即利用する。
     - 明示的な force_refresh 時だけ最新OSMを取りに行く。
     - 更新取得に失敗しても既存キャッシュがあればそれを使って継続する。
@@ -255,8 +255,11 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
     fwd, inv = _metric_transformers(boundary)
     boundary_m = transform(fwd, boundary)
     boundary_line = boundary_m.boundary
-    inside_region = boundary_m.buffer(0.8)
-    boundary_corridor = boundary_m.buffer(4.0)
+    # v1.1.7: 巡回対象は町丁目ポリゴンの内側へ厳密にクリップする。
+    # 境界外の中心線を「近いから」という理由だけで救済すると、縁から外向きの
+    # 不要な往復が発生するため、外側バンドは巡回対象にしない。
+    inside_region = boundary_m
+    boundary_corridor = boundary_m.buffer(2.0)
 
     park_polys = []
     for element in data.get("elements", []):
@@ -299,15 +302,9 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
         # まず町丁目内だけを採用。境界の中心線誤差だけ後段で救済する。
         chunks: list[tuple[LineString, bool]] = [(g, False) for g in _as_lines(line_m.intersection(inside_region)) if g.length >= 0.5]
 
-        # 境界線が実道路の片側へ引かれているケースを救済。ただし外へ向かう枝道は不可。
-        outside_band = line_m.intersection(boundary_corridor).difference(inside_region)
-        for g in _as_lines(outside_band):
-            if g.length < 8.0:
-                continue
-            if highway not in residential_required | {"service"}:
-                continue
-            if _is_boundary_parallel(g, boundary_line, 4.0):
-                chunks.append((g, True))
+        # v1.1.7: 境界外の道路中心線は巡回対象へ追加しない。
+        # 境界道路の取りこぼしよりも「エリア外へ出るルートを作らない」ことを優先する。
+        # 境界を横切る道路は上の exact intersection により、内側部分だけが残る。
 
         for geom_m, boundary_near in chunks:
             if geom_m.length < 0.5:

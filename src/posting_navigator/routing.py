@@ -344,6 +344,80 @@ def _cluster_component_outward(
     return ordered
 
 
+def _local_xy_m(point: tuple[float, float], origin: tuple[float, float]) -> tuple[float, float]:
+    """Small-area lon/lat -> local east/north metres."""
+    lon, lat = point
+    lon0, lat0 = origin
+    north = (lat - lat0) * 111_320.0
+    east = (lon - lon0) * 111_320.0 * math.cos(math.radians((lat + lat0) * 0.5))
+    return east, north
+
+
+def _assign_local_sweep_blocks(g: nx.MultiGraph, start, cell_m: float = 220.0) -> dict:
+    """Assign coarse, street-axis-aligned local blocks to required edges.
+
+    Blocks are anchored at the area's minimum projected coordinates rather than at
+    START.  This avoids splitting one obvious street block simply because START
+    happens to lie on a grid boundary.
+    """
+    if g.number_of_edges() == 0:
+        return {}
+    axis = _dominant_street_axis(g)
+    theta = math.radians(axis)
+    projected = []
+    for u, v, k, data in g.edges(keys=True, data=True):
+        mid = _edge_midpoint(data, u, v)
+        e, n = _local_xy_m(mid, start)
+        along = e * math.sin(theta) + n * math.cos(theta)
+        across = e * math.cos(theta) - n * math.sin(theta)
+        projected.append((u, v, k, data, along, across))
+    min_along = min(x[4] for x in projected)
+    min_across = min(x[5] for x in projected)
+    blocks = {}
+    for u, v, k, data, along, across in projected:
+        bid = (
+            math.floor((across - min_across) / (cell_m * 1.15)),
+            math.floor((along - min_along) / cell_m),
+        )
+        data["sweep_block"] = bid
+        blocks.setdefault(bid, {"edges": 0, "along": [], "across": []})
+        blocks[bid]["edges"] += 1
+        blocks[bid]["along"].append(along)
+        blocks[bid]["across"].append(across)
+
+    rows = {}
+    for bid, info in blocks.items():
+        a = sum(info["along"]) / len(info["along"])
+        c = sum(info["across"]) / len(info["across"])
+        info["centroid"] = (a, c)
+        rows.setdefault(bid[0], []).append((bid, a, c))
+    # Begin with the block containing the edge nearest START, then snake outward.
+    start_bid = min(
+        blocks,
+        key=lambda bid: _dist_m(
+            start,
+            (
+                start[0] + (blocks[bid]["centroid"][1] * math.cos(theta) + blocks[bid]["centroid"][0] * math.sin(theta)) / (111_320.0 * max(0.2, math.cos(math.radians(start[1])))),
+                start[1] + (-blocks[bid]["centroid"][1] * math.sin(theta) + blocks[bid]["centroid"][0] * math.cos(theta)) / 111_320.0,
+            ),
+        ),
+    )
+    row_order = sorted(rows, key=lambda r: (abs(r - start_bid[0]), r))
+    rank = {}
+    rr = 0
+    for row_i, row in enumerate(row_order):
+        vals = rows[row]
+        vals.sort(key=lambda x: x[1], reverse=bool(row_i % 2))
+        # In the first row, start from the cell nearest START rather than a fixed side.
+        if row_i == 0 and vals:
+            vals.sort(key=lambda x: abs(x[0][1] - start_bid[1]))
+        for bid, _, _ in vals:
+            rank[bid] = rr
+            rr += 1
+    for _, _, _, data, _, _ in projected:
+        data["sweep_rank"] = rank.get(data.get("sweep_block"), 0)
+    return rank
+
 def _graph_from_edge_refs(g: nx.MultiGraph, refs: set) -> nx.MultiGraph:
     out = nx.MultiGraph()
     for u, v, k in refs:
@@ -539,6 +613,13 @@ def _local_completion_euler_trail(g: nx.MultiGraph, start, end=None, radial: dic
     prev = None
     trail = []
     axis = _dominant_street_axis(h)
+    block_remaining = {}
+    for _, _, _, d in h.edges(keys=True, data=True):
+        bid = d.get("sweep_block")
+        if bid is not None:
+            block_remaining[bid] = block_remaining.get(bid, 0) + 1
+    current_block = None
+    completed_blocks = set()
     max_steps = h.number_of_edges() + 5
 
     while h.number_of_edges() and len(trail) < max_steps:
@@ -581,14 +662,42 @@ def _local_completion_euler_trail(g: nx.MultiGraph, start, end=None, radial: dic
                 # 大きく内側へ戻る動きを抑える。小さな枝往復はpendant_bonusが勝つ。
                 outward_penalty = max(0.0, rc - rv - 25.0) * 2.0
 
-            duplicated_penalty = 35.0 if data.get("duplicated") else 0.0
-            score = pendant_bonus + bridge_penalty + reverse + turn_penalty + grid_penalty + outward_penalty + duplicated_penalty
+            # Strong locality rule: finish the current nearby block before leaving it.
+            # This is intentionally stronger than pure distance optimality because field
+            # usability matters more than saving a few metres.
+            bid = data.get("sweep_block")
+            block_penalty = 0.0
+            if bid is not None:
+                if current_block is not None and bid != current_block and block_remaining.get(current_block, 0) > 0:
+                    block_penalty += 4200.0
+                if bid == current_block:
+                    block_penalty -= 450.0
+                if bid in completed_blocks:
+                    block_penalty += 6500.0
+                # Prefer the serpentine block order, but never at the expense of a local
+                # pendant branch that should be cleared immediately.
+                rank = float(data.get("sweep_rank", 0.0))
+                block_penalty += rank * 5.0
+
+            duplicated_penalty = 55.0 if data.get("duplicated") else 0.0
+            score = pendant_bonus + bridge_penalty + reverse + turn_penalty + grid_penalty + outward_penalty + block_penalty + duplicated_penalty
             scored.append((score, float(data.get("length", 0.0)), v, k, data))
 
         _, _, v, k, data = min(scored, key=lambda x: (x[0], x[1]))
+        bid = data.get("sweep_block")
+        if current_block is None and bid is not None:
+            current_block = bid
         row = (current, v, k, dict(data))
         trail.append(row)
         h.remove_edge(current, v, k)
+        if bid is not None:
+            block_remaining[bid] = max(0, block_remaining.get(bid, 1) - 1)
+            if block_remaining[bid] == 0:
+                completed_blocks.add(bid)
+                if bid == current_block:
+                    current_block = None
+            elif current_block is None:
+                current_block = bid
         prev = row
         current = v
 
@@ -692,6 +801,8 @@ def _step(u, v, data: dict, seq: int, *, transfer: bool = False, component: int 
         "duplicated": bool(data.get("duplicated")) if data else False,
         "transfer": transfer,
         "component": component,
+        "sweep_block": data.get("sweep_block") if data else None,
+        "sweep_rank": data.get("sweep_rank") if data else None,
     }
 
 
@@ -902,6 +1013,10 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
             transfer_length += _append_shortest_path_steps(full_graph, current_node, comp_start, steps, optimized_components + 1)
 
         comp_graph = required_graph.subgraph(nodes).copy()
+        # v1.1.7: align coarse local blocks to the dominant street axis.  The graph is
+        # still globally eulerized once, so this changes traversal order rather than
+        # introducing new duplicated roads.
+        _assign_local_sweep_blocks(comp_graph, comp_start, cell_m=220.0)
         radial = _node_radial_distances(comp_graph, comp_start)
         base_degrees = dict(comp_graph.degree())
         raw_end_candidates = [n for n in comp_graph.nodes if comp_graph.degree(n) != 2 and n != comp_start] or [n for n in comp_graph.nodes if n != comp_start]
@@ -990,7 +1105,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "dead_end_count": len(dead_ends),
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "block-completion-comb-grid-sweep",
-        "routing_strategy_version": "1.1.3",
+        "routing_strategy_version": "1.1.7",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }

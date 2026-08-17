@@ -20,12 +20,12 @@ def test_park_path_is_optional_and_not_traversed_when_unneeded():
     assert all(s.get("osm_id") != 11 for s in route["route_steps"])
 
 
-def test_boundary_parallel_residential_is_required_but_outward_branch_not_added():
+def test_boundary_parallel_residential_outside_and_outward_branch_not_added():
     boundary=Polygon([(139,35),(139.01,35),(139.01,35.01),(139,35.01)])
     along=way(1,{"highway":"residential"},[(139.001,34.99997),(139.009,34.99997)])
     outward=way(2,{"highway":"residential"},[(139.005,34.99997),(139.005,34.9994)])
     roads=osm_json_to_lines({"elements":[along,outward]},boundary)
-    assert any(r["id"]==1 and r["required"] for r in roads)
+    assert not any(r["id"]==1 for r in roads)
     assert not any(r["id"]==2 for r in roads)
 
 
