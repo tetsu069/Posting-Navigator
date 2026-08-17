@@ -1,3 +1,4 @@
+import pytest
 import networkx as nx
 from shapely.geometry import box
 from posting_navigator.fixture import make_offline_fixture
@@ -44,12 +45,9 @@ def test_route_never_draws_fake_transfer_between_disconnected_components():
         {"id": 1, "highway": "residential", "name": "A", "geometry": LineString([(139.0,35.0),(139.001,35.0)])},
         {"id": 2, "highway": "residential", "name": "B", "geometry": LineString([(139.01,35.0),(139.011,35.0)])},
     ]
-    route = generate_route(roads, start_point=(139.0,35.0))
-    assert route["component_count"] == 2
-    assert route["source_edges"] == 2
-    assert not any(step["transfer"] for step in route["route_steps"])
-    assert route["skipped_disconnected_length_m"] > 0
-    assert {step["osm_id"] for step in route["route_steps"] if not step["transfer"]} == {1}
+    # v1.1.8: partial coverage must never be displayed as a completed route.
+    with pytest.raises(ValueError, match="最後まで巡回できません"):
+        generate_route(roads, start_point=(139.0,35.0))
 
 
 def test_navigation_legs_follow_road_geometry():

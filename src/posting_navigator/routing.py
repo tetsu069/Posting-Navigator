@@ -649,11 +649,11 @@ def _local_completion_euler_trail(g: nx.MultiGraph, start, end=None, radial: dic
 
             pendant = _pendant_size_after_node(h, current, v, end=end, limit=32)
             # 小さな枝は「後回し」ではなく、その幹道路を通った今クリアする。
-            pendant_bonus = -900.0 + (pendant or 0) * 8.0 if pendant is not None else 0.0
+            pendant_bonus = -6000.0 + (pendant or 0) * 12.0 if pendant is not None else 0.0
 
             bridge_penalty = 0.0
             if not forced and _is_bridge_edge(h, current, v, k):
-                bridge_penalty = 600.0
+                bridge_penalty = 350.0
 
             outward_penalty = 0.0
             if radial is not None:
@@ -1060,6 +1060,17 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         current_node = comp_end
         optimized_components += 1
 
+    # v1.1.8: Never report a tiny partial route as "complete".  v1.1.7 could
+    # silently drop required components that were disconnected after strict boundary
+    # clipping, producing e.g. 4 navigation legs for hundreds of target roads.
+    # A field route is valid only when every required connected component was routed.
+    if remaining or skipped_disconnected_length > 0.1 or optimized_components < total_required_components:
+        raise ValueError(
+            "配布対象道路を最後まで巡回できません。境界内の道路接続が分断されています。"
+            f"（未接続成分 {max(0, total_required_components-optimized_components)}、"
+            f"未巡回 約{skipped_disconnected_length:.0f}m）"
+        )
+
     if not steps:
         raise ValueError("巡回ルートを生成できませんでした")
 
@@ -1105,7 +1116,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "dead_end_count": len(dead_ends),
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "block-completion-comb-grid-sweep",
-        "routing_strategy_version": "1.1.7",
+        "routing_strategy_version": "1.1.8",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
