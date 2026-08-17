@@ -19,7 +19,7 @@ def test_outward_strategy_marks_strategy_and_uses_real_road_connectors():
                           "geometry": LineString([(lon0+x*d, lat0+y*d), (lon0+x*d, lat0+(y+1)*d)])})
             rid += 1
     route = generate_route(roads, start_point=(lon0, lat0))
-    assert route["routing_strategy"] == "global-open-postman-turn-aware-outward"
+    assert route["routing_strategy"] == "block-completion-comb-grid-sweep"
     assert route["cluster_count"] >= 1
     assert route["route_steps"]
     # Transfer geometry is always a source-road geometry, never a coordinate chord.
@@ -67,7 +67,7 @@ def test_outward_route_does_not_create_consecutive_uturn_navigation_on_grid():
     route=generate_route(roads,start_point=(lon0,lat0))
     turns=[leg['turn'] for leg in route['navigation_legs']]
     assert not any(a=='折り返し' and b=='折り返し' for a,b in zip(turns,turns[1:]))
-    assert route['routing_strategy']=='global-open-postman-turn-aware-outward'
+    assert route['routing_strategy']=='block-completion-comb-grid-sweep'
 
 
 

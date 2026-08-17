@@ -394,6 +394,160 @@ def _turn_aware_euler_trail(g: nx.MultiGraph, start, end=None, samples: int = 96
     return best
 
 
+
+def _undirected_angle_diff(a: float, b: float) -> float:
+    """0..90deg. bearingは向きを無視して比較する。"""
+    d = abs(((a - b + 90.0) % 180.0) - 90.0)
+    return d
+
+
+def _dominant_street_axis(g: nx.MultiGraph) -> float:
+    """格子状街区の主軸を道路延長の重み付きヒストグラムから求める。"""
+    bins = [0.0] * 12  # 15度刻み、0..180
+    for u, v, data in g.edges(data=True):
+        b = _edge_departure_bearing(u, v, data) % 180.0
+        idx = int((b + 7.5) // 15.0) % 12
+        bins[idx] += max(1.0, float(data.get("length", 0.0)))
+    if not any(bins):
+        return 0.0
+    i = max(range(len(bins)), key=bins.__getitem__)
+    return (i * 15.0) % 180.0
+
+
+def _is_bridge_edge(g: nx.MultiGraph, u, v, k) -> bool:
+    """残グラフで今この辺を使うと未処理部を分断するか。並行辺はbridgeではない。"""
+    if g.number_of_edges(u, v) > 1:
+        return False
+    if g.degree(u) <= 1 or g.degree(v) <= 1:
+        return False
+    try:
+        before = nx.number_connected_components(g)
+        data = dict(g[u][v][k])
+        g.remove_edge(u, v, k)
+        after = nx.number_connected_components(g)
+        g.add_edge(u, v, key=k, **data)
+        return after > before
+    except Exception:
+        return False
+
+
+def _pendant_size_after_node(g: nx.MultiGraph, current, neighbor, end=None, limit: int = 40) -> int | None:
+    """currentを外すとneighbor側が小さな袋小路群になる場合、その大きさを返す。
+
+    幹道路を進みながら左右の行止まりをその場で処理するための判定。
+    """
+    if current == neighbor or neighbor not in g:
+        return None
+    # currentを実際にcopy/removeすると重いので、currentを通らないBFSを上限付きで行う。
+    seen = {neighbor}
+    q = [neighbor]
+    while q and len(seen) <= limit:
+        n = q.pop()
+        if end is not None and n == end:
+            return None
+        for m in g.neighbors(n):
+            if m == current or m in seen:
+                continue
+            seen.add(m)
+            q.append(m)
+    if len(seen) > limit:
+        return None
+    # current以外の外界へつながっていない小成分なら pendant。
+    return len(seen)
+
+
+def _local_completion_euler_trail(g: nx.MultiGraph, start, end=None, radial: dict | None = None):
+    """現場向けFleury/Hierholzerハイブリッド。
+
+    優先順位:
+      1. 今いる幹道路にぶら下がる小さな袋小路群をその場で完了
+      2. 未処理部を分断するbridgeを最後まで温存
+      3. 格子状街区では同じ主軸をなるべく直進して端まで処理
+      4. 即時Uターンを避ける
+      5. START近傍を残して遠くへ飛ばない
+
+    Euler化済みgraphなので、全辺を必ず1回ずつ使う順序だけを人向けに並べ替える。
+    """
+    h = g.copy()
+    current = start
+    prev = None
+    trail = []
+    axis = _dominant_street_axis(h)
+    max_steps = h.number_of_edges() + 5
+
+    while h.number_of_edges() and len(trail) < max_steps:
+        rows = list(h.edges(current, keys=True, data=True))
+        if not rows:
+            raise nx.NetworkXError("Euler巡回中に未処理辺から切断されました")
+        forced = len(rows) == 1
+
+        scored = []
+        for _, v, k, data in rows:
+            depart = _edge_departure_bearing(current, v, data)
+            axis_diff = min(_undirected_angle_diff(depart, axis), _undirected_angle_diff(depart, (axis + 90.0) % 180.0))
+            # 主軸/副軸どちらかに揃う格子道路を優先。斜めの接続道路は後回し。
+            grid_penalty = axis_diff * 0.8
+
+            reverse = 0.0
+            turn_penalty = 0.0
+            if prev is not None:
+                pu, pv, _, pdata = prev
+                incoming = _edge_departure_bearing(pu, pv, pdata)
+                diff = abs(((depart - incoming + 540.0) % 360.0) - 180.0)
+                turn_penalty = diff * 0.35
+                if v == pu:
+                    reverse = 1200.0
+
+            pendant = _pendant_size_after_node(h, current, v, end=end, limit=32)
+            # 小さな枝は「後回し」ではなく、その幹道路を通った今クリアする。
+            pendant_bonus = -900.0 + (pendant or 0) * 8.0 if pendant is not None else 0.0
+
+            bridge_penalty = 0.0
+            if not forced and _is_bridge_edge(h, current, v, k):
+                bridge_penalty = 600.0
+
+            outward_penalty = 0.0
+            if radial is not None:
+                rc = radial.get(current, 0.0)
+                rv = radial.get(v, rc)
+                # 大きく内側へ戻る動きを抑える。小さな枝往復はpendant_bonusが勝つ。
+                outward_penalty = max(0.0, rc - rv - 25.0) * 2.0
+
+            duplicated_penalty = 35.0 if data.get("duplicated") else 0.0
+            score = pendant_bonus + bridge_penalty + reverse + turn_penalty + grid_penalty + outward_penalty + duplicated_penalty
+            scored.append((score, float(data.get("length", 0.0)), v, k, data))
+
+        _, _, v, k, data = min(scored, key=lambda x: (x[0], x[1]))
+        row = (current, v, k, dict(data))
+        trail.append(row)
+        h.remove_edge(current, v, k)
+        prev = row
+        current = v
+
+    if h.number_of_edges():
+        raise nx.NetworkXError("Euler巡回を完了できませんでした")
+    if end is not None and current != end:
+        raise nx.NetworkXError("指定GOALに到達しないEuler巡回になりました")
+    return trail
+
+
+def _local_completion_quality(trail: list[tuple], radial: dict | None = None) -> tuple:
+    """既存qualityに『同じ交差点/局所へ後から戻る』ペナルティを追加。"""
+    base = _trail_quality(trail, radial=radial)
+    last_visit = {}
+    revisits = 0
+    long_revisits = 0
+    for i, (u, v, k, data) in enumerate(trail):
+        for n in (u, v):
+            if n in last_visit:
+                gap = i - last_visit[n]
+                if gap >= 6:
+                    revisits += 1
+                if gap >= 18:
+                    long_revisits += 1
+            last_visit[n] = i
+    return (long_revisits, revisits) + base
+
 def _cluster_exit_node(comp_graph: nx.MultiGraph, cluster_graph: nx.MultiGraph, entry, radial: dict, next_cluster: dict | None):
     """クラスタ途中で引き返さず、次の塊へ抜けやすい交差点を出口にする。"""
     nodes = list(cluster_graph.nodes)
@@ -598,7 +752,7 @@ def build_navigation_legs(steps: list[dict]) -> list[dict]:
 def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
     """重複距離を抑えつつ、近い道路から外側へ進む1町丁目1ルートを生成する。
 
-    v1.1.1ではクラスタごとの個別Euler化をやめ、連結成分全体を一度だけOpen Chinese
+    v1.1.2では町丁目全体のOpen Chinese
     Postman化する。これにより重複辺を全体最適化したうえで、多数存在する同距離のEuler路
     の中から折返し/Uターン/内側道路の取り残しが少ない順序を選ぶ。
     """
@@ -648,13 +802,27 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
             comp_end = max(comp_graph.nodes, key=lambda n: radial.get(n, 0.0))
 
         routed = _eulerize_open(comp_graph, comp_start, comp_end)
+        candidates = []
+        # まず「その場で枝を完了・格子を順番に潰す」決定論的巡回を試す。
         try:
-            trail = _turn_aware_euler_trail(routed, comp_start, comp_end, samples=128, radial=radial)
+            local = _local_completion_euler_trail(routed, comp_start, comp_end, radial=radial)
+            candidates.append(local)
         except nx.NetworkXError:
-            # 特殊parity時だけ閉路へフォールバック。ただし順序最適化は同じものを使う。
+            pass
+        # 距離は同一なので、従来のEuler候補も少数だけ残し、局所完結性で比較する。
+        try:
+            sampled = _turn_aware_euler_trail(routed, comp_start, comp_end, samples=36, radial=radial)
+            candidates.append(sampled)
+        except nx.NetworkXError:
+            pass
+        if not candidates:
             routed = eulerize_weighted(comp_graph)
             comp_end = comp_start
-            trail = _turn_aware_euler_trail(routed, comp_start, comp_start, samples=128, radial=radial)
+            try:
+                candidates.append(_local_completion_euler_trail(routed, comp_start, comp_start, radial=radial))
+            except nx.NetworkXError:
+                candidates.append(_turn_aware_euler_trail(routed, comp_start, comp_start, samples=36, radial=radial))
+        trail = min(candidates, key=lambda t: _local_completion_quality(t, radial=radial))
 
         for u, v, k, data in trail:
             st = _step(u, v, data, len(steps) + 1, component=component_index)
@@ -700,7 +868,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "cluster_count": optimized_components,
         "skipped_disconnected_length_m": round(skipped_disconnected_length, 1),
         "dead_end_count": len(dead_ends),
-        "routing_strategy": "global-open-postman-turn-aware-outward",
+        "routing_strategy": "block-completion-comb-grid-sweep",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
