@@ -649,11 +649,20 @@ def _local_completion_euler_trail(g: nx.MultiGraph, start, end=None, radial: dic
 
             pendant = _pendant_size_after_node(h, current, v, end=end, limit=32)
             # 小さな枝は「後回し」ではなく、その幹道路を通った今クリアする。
-            pendant_bonus = -6000.0 + (pendant or 0) * 12.0 if pendant is not None else 0.0
+            # Euler化すると袋小路には戻り用の重複辺が追加されるため、hだけを見ると
+            # pendant判定が弱くなる。元の道路次数(base_degrees)でも真の行止まりを判定する。
+            leaf_branch = base_degrees.get(current, 0) > 1 and base_degrees.get(v, 0) == 1
+            if leaf_branch:
+                pendant_bonus = -25000.0
+            else:
+                pendant_bonus = -6000.0 + (pendant or 0) * 12.0 if pendant is not None else 0.0
 
             bridge_penalty = 0.0
             if not forced and _is_bridge_edge(h, current, v, k):
-                bridge_penalty = 350.0
+                # Fleuryの原則: 他の選択肢がある間はbridgeを使わない。
+                # これを弱い罰則にすると、途中で袋状に自分を閉じ込めて同じ道を
+                # すぐ戻る原因になる。
+                bridge_penalty = 500000.0
 
             outward_penalty = 0.0
             if radial is not None:
@@ -678,6 +687,18 @@ def _local_completion_euler_trail(g: nx.MultiGraph, start, end=None, radial: dic
                 # pendant branch that should be cleared immediately.
                 rank = float(data.get("sweep_rank", 0.0))
                 block_penalty += rank * 5.0
+                # 同じ格子行では、行ごとに進行方向を反転させる蛇行を優先。
+                try:
+                    row_idx = int(bid[0])
+                    desired = axis if row_idx % 2 == 0 else (axis + 180.0) % 360.0
+                    along = min(_undirected_angle_diff(depart, axis), _undirected_angle_diff(depart, (axis + 90.0) % 180.0))
+                    if _undirected_angle_diff(depart, axis) <= 28.0:
+                        ddir = abs(((depart - desired + 540.0) % 360.0) - 180.0)
+                        block_penalty += ddir * 2.5
+                        if ddir < 40.0:
+                            block_penalty -= 500.0
+                except Exception:
+                    pass
 
             duplicated_penalty = 55.0 if data.get("duplicated") else 0.0
             score = pendant_bonus + bridge_penalty + reverse + turn_penalty + grid_penalty + outward_penalty + block_penalty + duplicated_penalty
@@ -992,7 +1013,7 @@ def _route_parts_from_steps(steps: list[dict]) -> list[LineString]:
 
 
 def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
-    """v1.1.9 階層型・全成分完走ルート。
+    """v1.2.0 現場向け蛇行・袋小路即処理ルート。
 
     配布対象道路が複数の連結成分に分かれていても、1成分ずつ完全に処理して
     近い次成分へ進む。移動可能な場合は full_graph の実道路だけを使う。
@@ -1064,7 +1085,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         radial = _node_radial_distances(comp_graph, comp_start)
         base_degrees = dict(comp_graph.degree())
         raw_end_candidates = [n for n in comp_graph.nodes if comp_graph.degree(n) != 2 and n != comp_start] or [n for n in comp_graph.nodes if n != comp_start]
-        end_candidates = sorted(raw_end_candidates, key=lambda n: radial.get(n, 0.0), reverse=True)[:10]
+        end_candidates = sorted(raw_end_candidates, key=lambda n: radial.get(n, 0.0), reverse=True)[:min(24, len(raw_end_candidates))]
         if not end_candidates:
             end_candidates = [comp_start]
 
@@ -1088,7 +1109,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
                 candidate_trails.append(
                     _turn_aware_euler_trail(
                         routed, comp_start, candidate_end,
-                        samples=96, radial=radial,
+                        samples=160, radial=radial,
                     )
                 )
             except nx.NetworkXError:
@@ -1167,7 +1188,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "block-completion-comb-grid-sweep",
         "component_routing": "hierarchical-component-completion",
-        "routing_strategy_version": "1.1.9",
+        "routing_strategy_version": "1.2.0",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
