@@ -51,8 +51,8 @@ def build(args: argparse.Namespace) -> int:
         stem = f"worker_{assignment['worker_id']:02d}"
         worker_kml = write_kml(f"{args.area} {assignment['name']}", boundary, roads, worker_route, workers_dir / f"{stem}.kml")
         write_kmz(worker_kml, workers_dir / f"{stem}.kmz")
-    (out / "summary.json").write_text(json.dumps({**{k:v for k,v in route.items() if k not in {"geometry", "start_point", "requested_start", "assignments", "route_steps", "navigation_legs"}}, "assignments": [{k:v for k,v in a.items() if k not in {"geometry", "start_point", "end_point"}} for a in route["assignments"]]}, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({**{k:v for k,v in route.items() if k not in {"geometry", "start_point", "requested_start", "assignments", "route_steps", "navigation_legs"}}, "assignments": [{k:v for k,v in a.items() if k not in {"geometry", "start_point", "end_point"}} for a in route["assignments"]]}, ensure_ascii=False, indent=2))
+    (out / "summary.json").write_text(json.dumps({**{k:v for k,v in route.items() if k not in {"geometry", "route_parts", "start_point", "requested_start", "assignments", "route_steps", "navigation_legs"}}, "assignments": [{k:v for k,v in a.items() if k not in {"geometry", "start_point", "end_point"}} for a in route["assignments"]]}, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps({**{k:v for k,v in route.items() if k not in {"geometry", "route_parts", "start_point", "requested_start", "assignments", "route_steps", "navigation_legs"}}, "assignments": [{k:v for k,v in a.items() if k not in {"geometry", "start_point", "end_point"}} for a in route["assignments"]]}, ensure_ascii=False, indent=2))
     return 0
 
 

@@ -14,7 +14,10 @@ def test_dead_end_is_taken_when_first_reaching_its_junction():
     # the next departure from B must enter the tooth, not pass it and come back later
     assert st[first_B+1]['from']==B and st[first_B+1]['to']==E
 
-def test_partial_disconnected_route_is_never_reported_complete():
+def test_disconnected_required_components_are_all_completed_without_fake_line():
     A=(139.0,35.0); B=(139.0003,35.0); C=(139.01,35.0); D=(139.0103,35.0)
-    with pytest.raises(ValueError, match='最後まで巡回できません'):
-        generate_route([road(1,A,B), road(2,C,D)], start_point=A)
+    r=generate_route([road(1,A,B), road(2,C,D)], start_point=A)
+    assert r['cluster_count']==2
+    assert r['manual_transfer_count']==1
+    assert r['geometry'].geom_type=='MultiLineString'
+    assert len(r['route_steps'])>=2

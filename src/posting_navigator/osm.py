@@ -42,7 +42,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.1.8 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.1.9 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -133,7 +133,7 @@ def fetch_osm_roads(
 ):
     """Overpass APIから道路wayを取得する。
 
-    v1.1.8 では「毎回Overpassへ行かない」を最優先にする。
+    v1.1.9 では「毎回Overpassへ行かない」を最優先にする。
     - 通常はローカルキャッシュを即利用する。
     - 明示的な force_refresh 時だけ最新OSMを取りに行く。
     - 更新取得に失敗しても既存キャッシュがあればそれを使って継続する。
@@ -255,7 +255,7 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
     fwd, inv = _metric_transformers(boundary)
     boundary_m = transform(fwd, boundary)
     boundary_line = boundary_m.boundary
-    # v1.1.8: 巡回対象は町丁目ポリゴンの内側へ厳密にクリップする。
+    # v1.1.9: 巡回対象は町丁目ポリゴンの内側へ厳密にクリップする。
     # 境界外の中心線を「近いから」という理由だけで救済すると、縁から外向きの
     # 不要な往復が発生するため、外側バンドは巡回対象にしない。
     inside_region = boundary_m
@@ -302,7 +302,7 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
         # まず町丁目内だけを採用。境界の中心線誤差だけ後段で救済する。
         chunks: list[tuple[LineString, bool]] = [(g, False) for g in _as_lines(line_m.intersection(inside_region)) if g.length >= 0.5]
 
-        # v1.1.8: 境界外の道路中心線は巡回対象へ追加しない。
+        # v1.1.9: 境界外の道路中心線は巡回対象へ追加しない。
         # 境界道路の取りこぼしよりも「エリア外へ出るルートを作らない」ことを優先する。
         # 境界を横切る道路は上の exact intersection により、内側部分だけが残る。
 

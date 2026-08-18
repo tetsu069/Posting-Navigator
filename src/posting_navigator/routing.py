@@ -5,7 +5,7 @@ import heapq
 import itertools
 import networkx as nx
 from pyproj import Geod
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, MultiLineString, Point
 from shapely.ops import unary_union
 
 GEOD = Geod(ellps="WGS84")
@@ -803,6 +803,7 @@ def _step(u, v, data: dict, seq: int, *, transfer: bool = False, component: int 
         "component": component,
         "sweep_block": data.get("sweep_block") if data else None,
         "sweep_rank": data.get("sweep_rank") if data else None,
+        "component_break_before": False,
     }
 
 
@@ -860,13 +861,14 @@ def _raw_navigation_legs(steps: list[dict]) -> list[dict]:
                 "length_m": step["length_m"], "name": step.get("name", ""),
                 "transfer": step.get("transfer", False), "duplicated": step.get("duplicated", False),
                 "bearing_start": b0, "bearing_end": b1,
+                "component_break_before": bool(step.get("component_break_before", False)),
             }
             continue
         diff = abs(((b0 - current["bearing_end"] + 540) % 360) - 180)
         same_kind = step.get("transfer", False) == current["transfer"] and step.get("duplicated", False) == current["duplicated"]
         same_name = bool(step.get("name")) and bool(current.get("name")) and step.get("name") == current.get("name")
         contiguous = _dist_m(current["coords"][-1], coords[0]) <= 1.5
-        can_merge = contiguous and same_kind and ((same_name and diff < 60) or diff < 25) and current["length_m"] < 280
+        can_merge = (not step.get("component_break_before", False)) and contiguous and same_kind and ((same_name and diff < 60) or diff < 25) and current["length_m"] < 280
         if can_merge:
             current["coords"].extend(coords[1:])
             current["end_seq"] = step["seq"]
@@ -881,6 +883,7 @@ def _raw_navigation_legs(steps: list[dict]) -> list[dict]:
                 "length_m": step["length_m"], "name": step.get("name", ""),
                 "transfer": step.get("transfer", False), "duplicated": step.get("duplicated", False),
                 "bearing_start": b0, "bearing_end": b1,
+                "component_break_before": bool(step.get("component_break_before", False)),
             }
     if current is not None:
         legs.append(current)
@@ -893,9 +896,9 @@ def _coalesce_micro_legs(legs: list[dict], threshold_m: float = 7.0) -> list[dic
     i = 0
     while i < len(legs):
         leg = legs[i]
-        if leg["length_m"] < threshold_m and not leg["transfer"]:
+        if leg["length_m"] < threshold_m and not leg["transfer"] and not leg.get("component_break_before", False):
             # 次区間へ吸収するのを優先。開始直後の「左折1m→折返し1m」を消す。
-            if i + 1 < len(legs) and not legs[i+1]["transfer"] and _dist_m(leg["coords"][-1], legs[i+1]["coords"][0]) <= 1.5:
+            if i + 1 < len(legs) and not legs[i+1]["transfer"] and not legs[i+1].get("component_break_before", False) and _dist_m(leg["coords"][-1], legs[i+1]["coords"][0]) <= 1.5:
                 nxt = dict(legs[i+1])
                 nxt["coords"] = leg["coords"] + nxt["coords"][1:]
                 nxt["start_seq"] = leg["start_seq"]
@@ -923,17 +926,21 @@ def build_navigation_legs(steps: list[dict]) -> list[dict]:
     for i, leg in enumerate(legs, start=1):
         leg["bearing_start"] = _bearing_over_distance(leg["coords"], from_start=True)
         leg["bearing_end"] = _bearing_over_distance(leg["coords"], from_start=False)
-        turn = _turn_label(prev, leg["bearing_start"])
+        break_before = bool(leg.get("component_break_before", False))
+        turn = "次の道路群へ移動" if break_before else _turn_label(prev, leg["bearing_start"])
         road = leg.get("name") or ("次の道路群へ移動" if leg["transfer"] else "この道路")
-        instruction = f"{turn}：{road}を約{round(leg['length_m'])}m"
+        instruction = (
+            f"次の道路群の入口へ移動後、{road}を約{round(leg['length_m'])}m"
+            if break_before else f"{turn}：{road}を約{round(leg['length_m'])}m"
+        )
         result.append({
             "leg": i, "start_seq": leg["start_seq"], "end_seq": leg["end_seq"],
             "geometry": LineString(leg["coords"]), "length_m": round(leg["length_m"], 1),
             "name": leg.get("name", ""), "turn": turn, "instruction": instruction,
             "bearing": round(leg["bearing_start"], 1), "transfer": leg["transfer"],
-            "duplicated": leg["duplicated"],
+            "duplicated": leg["duplicated"], "component_break_before": break_before,
         })
-        prev = leg["bearing_end"]
+        prev = None if break_before else leg["bearing_end"]
     return result
 
 def _required_subgraph(full_graph: nx.MultiGraph) -> nx.MultiGraph:
@@ -956,13 +963,42 @@ def _nearest_component_entry(full_graph: nx.MultiGraph, current, nodes: set) -> 
     return node, dist
 
 
-def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
-    """v1.1.3 現場優先ルート。
+def _nearest_component_spatial(current, nodes: set) -> tuple[tuple, float]:
+    """実道路で接続不能な場合の次成分選択。線は描かず、入口だけ空間最近傍で選ぶ。"""
+    node = min(nodes, key=lambda n: _dist_m(current, n))
+    return node, _dist_m(current, node)
 
-    - 住宅街の道路だけを「配布必須」として網羅する。
-    - 太い幹線道路、公園内園路、駐車場通路は必須にせず、必要時だけ移動に使う。
-    - 一つの局所成分を終わらせてから次へ進み、行き止まりはその場で処理する。
-    - 道路途中の即時折返しは、真の袋小路以外では強く禁止する。
+
+def _route_parts_from_steps(steps: list[dict]) -> list[LineString]:
+    """不連続成分を道路外直線で結ばず、連続したLineString群として返す。"""
+    parts: list[LineString] = []
+    coords: list[tuple[float, float]] = []
+    for st in steps:
+        c = list(st["geometry"].coords)
+        if not c:
+            continue
+        if not coords:
+            coords = c[:]
+            continue
+        if st.get("component_break_before") or _dist_m(coords[-1], c[0]) > 1.5:
+            if len(coords) >= 2:
+                parts.append(LineString(coords))
+            coords = c[:]
+        else:
+            coords.extend(c[1:])
+    if len(coords) >= 2:
+        parts.append(LineString(coords))
+    return parts
+
+
+def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
+    """v1.1.9 階層型・全成分完走ルート。
+
+    配布対象道路が複数の連結成分に分かれていても、1成分ずつ完全に処理して
+    近い次成分へ進む。移動可能な場合は full_graph の実道路だけを使う。
+    実道路上で接続できない成分間は架空の直線を描かず「移動ブレーク」として
+    ルートを分割し、次成分の入口から再開する。これにより一部だけで終了したり、
+    道路外の線を生成したりせず、すべての配布対象道路を巡回対象に残す。
     """
     full_graph = build_graph(roads)
     required_graph = _required_subgraph(full_graph)
@@ -973,9 +1009,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
     dead_ends = [n for n, degree in required_graph.degree() if degree == 1]
     remaining = [set(c) for c in nx.connected_components(required_graph)]
     total_required_components = len(remaining)
-    skipped_disconnected_length = 0.0
 
-    # STARTは配布必須道路へスナップする。
     all_required_nodes = set(required_graph.nodes)
     if start_point is None:
         first_start = _nearest_node(required_graph, None)
@@ -987,10 +1021,13 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
     duplicated_length = 0.0
     major_duplicated = 0.0
     transfer_length = 0.0
+    manual_transfer_distance = 0.0
+    manual_transfer_count = 0
     optimized_components = 0
+    component_order: list[dict] = []
 
     while remaining:
-        # 今いる場所から「実道路上で」最短の未処理塊を選ぶ。近所を残して遠くへ飛ばない。
+        # まず実道路上で到達可能な未処理成分を優先する。
         reachable = []
         for idx, nodes in enumerate(remaining):
             try:
@@ -998,30 +1035,35 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
                 reachable.append((dist, idx, entry, nodes))
             except nx.NetworkXNoPath:
                 continue
-        if not reachable:
-            # 実道路上で接続できない孤立成分は偽の直線で結ばず、診断値として残す。
-            for nodes in remaining:
-                sg = required_graph.subgraph(nodes)
-                skipped_disconnected_length += sum(d.get("length", 0.0) for _, _, d in sg.edges(data=True))
-            remaining.clear()
-            break
-        _, idx, comp_start, nodes = min(reachable, key=lambda x: x[0])
-        remaining.pop(idx)
 
-        # 次の塊へ行くための移動も実道路上のみ。公園/幹線はここで必要な時だけ使われる。
-        if current_node != comp_start:
-            transfer_length += _append_shortest_path_steps(full_graph, current_node, comp_start, steps, optimized_components + 1)
+        break_before = False
+        if reachable:
+            dist, idx, comp_start, nodes = min(reachable, key=lambda x: x[0])
+            remaining.pop(idx)
+            if current_node != comp_start:
+                transfer_length += _append_shortest_path_steps(
+                    full_graph, current_node, comp_start, steps, optimized_components + 1
+                )
+        else:
+            # OSM/境界クリップのため full_graph 自体が分断されている場合。
+            # ここで架空の道路線は作らない。最寄り成分へ「徒歩移動」として切り替え、
+            # 次の成分の入口から巡回を再開する。
+            spatial = []
+            for idx, nodes in enumerate(remaining):
+                entry, dist = _nearest_component_spatial(current_node, nodes)
+                spatial.append((dist, idx, entry, nodes))
+            dist, idx, comp_start, nodes = min(spatial, key=lambda x: x[0])
+            remaining.pop(idx)
+            break_before = bool(steps)
+            if break_before:
+                manual_transfer_count += 1
+                manual_transfer_distance += dist
 
         comp_graph = required_graph.subgraph(nodes).copy()
-        # v1.1.7: align coarse local blocks to the dominant street axis.  The graph is
-        # still globally eulerized once, so this changes traversal order rather than
-        # introducing new duplicated roads.
         _assign_local_sweep_blocks(comp_graph, comp_start, cell_m=220.0)
         radial = _node_radial_distances(comp_graph, comp_start)
         base_degrees = dict(comp_graph.degree())
         raw_end_candidates = [n for n in comp_graph.nodes if comp_graph.degree(n) != 2 and n != comp_start] or [n for n in comp_graph.nodes if n != comp_start]
-        # 「最遠点固定」だと途中Uターンを強制する場合がある。外側の候補を複数試し、
-        # Uターンなし→局所完結→戻りの少なさ、の順で最良GOALを選ぶ。
         end_candidates = sorted(raw_end_candidates, key=lambda n: radial.get(n, 0.0), reverse=True)[:10]
         if not end_candidates:
             end_candidates = [comp_start]
@@ -1034,22 +1076,32 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
                 continue
             candidate_trails = []
             try:
-                candidate_trails.append(_local_completion_euler_trail(routed, comp_start, candidate_end, radial=radial, base_degrees=base_degrees))
+                candidate_trails.append(
+                    _local_completion_euler_trail(
+                        routed, comp_start, candidate_end,
+                        radial=radial, base_degrees=base_degrees,
+                    )
+                )
             except nx.NetworkXError:
                 pass
             try:
-                candidate_trails.append(_turn_aware_euler_trail(routed, comp_start, candidate_end, samples=96, radial=radial))
+                candidate_trails.append(
+                    _turn_aware_euler_trail(
+                        routed, comp_start, candidate_end,
+                        samples=96, radial=radial,
+                    )
+                )
             except nx.NetworkXError:
                 pass
             for t in candidate_trails:
                 quality = _local_completion_quality(t, radial=radial, base_degrees=base_degrees)
-                # GOALは外側を優先。ただし途中Uターンをなくせるならそちらが最優先。
                 outward_bonus = -radial.get(candidate_end, 0.0) / 5000.0
                 route_options.append((quality + (outward_bonus,), candidate_end, t))
         if not route_options:
             raise ValueError("巡回順を生成できませんでした")
         _, comp_end, trail = min(route_options, key=lambda x: x[0])
 
+        first_component_step_index = len(steps)
         for u, v, k, data in trail:
             st = _step(u, v, data, len(steps) + 1, component=optimized_components + 1)
             steps.append(st)
@@ -1057,48 +1109,44 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
                 duplicated_length += st["length_m"]
                 if st["highway"] in {"primary", "primary_link", "secondary", "secondary_link", "tertiary", "tertiary_link"}:
                     major_duplicated += st["length_m"]
+        if break_before and len(steps) > first_component_step_index:
+            steps[first_component_step_index]["component_break_before"] = True
+
+        component_order.append({
+            "component": optimized_components + 1,
+            "start_lon": comp_start[0], "start_lat": comp_start[1],
+            "end_lon": comp_end[0], "end_lat": comp_end[1],
+            "manual_transfer_before": break_before,
+        })
         current_node = comp_end
         optimized_components += 1
 
-    # v1.1.8: Never report a tiny partial route as "complete".  v1.1.7 could
-    # silently drop required components that were disconnected after strict boundary
-    # clipping, producing e.g. 4 navigation legs for hundreds of target roads.
-    # A field route is valid only when every required connected component was routed.
-    if remaining or skipped_disconnected_length > 0.1 or optimized_components < total_required_components:
-        raise ValueError(
-            "配布対象道路を最後まで巡回できません。境界内の道路接続が分断されています。"
-            f"（未接続成分 {max(0, total_required_components-optimized_components)}、"
-            f"未巡回 約{skipped_disconnected_length:.0f}m）"
-        )
-
+    if optimized_components != total_required_components:
+        raise ValueError("配布対象道路を最後まで巡回できません")
     if not steps:
         raise ValueError("巡回ルートを生成できませんでした")
 
-    coords = []
-    for st in steps:
-        c = list(st["geometry"].coords)
-        if not coords:
-            coords.extend(c)
-        elif _dist_m(coords[-1], c[0]) <= 1.5:
-            coords.extend(c[1:])
-        else:
-            # 実道路上のtransferを入れているため通常ここには来ない。
-            break
-    route = LineString(coords) if len(coords) >= 2 else steps[0]["geometry"]
+    parts = _route_parts_from_steps(steps)
+    if not parts:
+        raise ValueError("巡回ルート形状を生成できませんでした")
+    route_geometry = parts[0] if len(parts) == 1 else MultiLineString(parts)
     route_length = sum(st["length_m"] for st in steps)
     navigation_legs = build_navigation_legs(steps)
 
-    # 診断: 真の袋小路以外で即時折返しが何回あるか。
     midroad_uturns = 0
     req_deg = dict(required_graph.degree())
     for a, b in zip(steps, steps[1:]):
+        if a.get("component") != b.get("component"):
+            continue
         if a["from"] == b["to"] and a["to"] == b["from"] and req_deg.get(a["to"], 0) > 1:
             midroad_uturns += 1
 
     return {
-        "geometry": route,
+        "geometry": route_geometry,
+        "route_parts": parts,
         "route_steps": steps,
         "navigation_legs": navigation_legs,
+        "component_order": component_order,
         "start_point": Point(first_start),
         "requested_start": Point(start_point) if start_point else None,
         "source_edges": required_graph.number_of_edges(),
@@ -1106,27 +1154,50 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "source_length_m": round(source_length, 1),
         "route_length_m": round(route_length, 1),
         "transfer_length_m": round(transfer_length, 1),
+        "manual_transfer_distance_m": round(manual_transfer_distance, 1),
+        "manual_transfer_count": manual_transfer_count,
         "duplicated_length_m": round(duplicated_length, 1),
         "major_road_duplicated_m": round(major_duplicated, 1),
         "duplication_ratio": round((route_length - transfer_length) / max(source_length, 1.0), 3),
         "connected_nodes": required_graph.number_of_nodes(),
         "component_count": total_required_components,
         "cluster_count": optimized_components,
-        "skipped_disconnected_length_m": round(skipped_disconnected_length, 1),
+        "skipped_disconnected_length_m": 0.0,
         "dead_end_count": len(dead_ends),
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "block-completion-comb-grid-sweep",
-        "routing_strategy_version": "1.1.8",
+        "component_routing": "hierarchical-component-completion",
+        "routing_strategy_version": "1.1.9",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
 
-
 def split_route(route: dict, workers: int) -> list[dict]:
-    """巡回順序を保ったまま担当区間を距離均等分割する。"""
+    """巡回順序を保ったまま担当区間を距離均等分割する。
+
+    現行Web版は1町丁目=1担当。MultiLineStringは道路外直線で結ばず、そのまま
+    1担当の複数連続パートとして保持する。
+    """
     if workers < 1:
         raise ValueError("担当者数は1以上で指定してください")
-    coords = list(route["geometry"].coords)
+    geom = route["geometry"]
+    if geom.geom_type == "MultiLineString":
+        if workers != 1:
+            raise ValueError("分断ルートの複数担当分割には対応していません")
+        parts = list(geom.geoms)
+        if not parts:
+            raise ValueError("分割対象ルートが空です")
+        start = tuple(parts[0].coords[0])
+        end = tuple(parts[-1].coords[-1])
+        return [{
+            "worker_id": 1, "name": "担当01", "geometry": geom,
+            "length_m": round(float(route.get("route_length_m", sum(x.length for x in parts))), 1),
+            "start_point": Point(start), "end_point": Point(end),
+            "start_lon": start[0], "start_lat": start[1],
+            "end_lon": end[0], "end_lat": end[1],
+            "difference_from_average_m": 0.0,
+        }]
+    coords = list(geom.coords)
     if len(coords) < 2:
         raise ValueError("分割対象ルートが空です")
     edge_lengths = [_dist_m(a, b) for a, b in zip(coords, coords[1:])]

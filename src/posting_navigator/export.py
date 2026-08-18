@@ -12,8 +12,20 @@ def _coords_text(coords) -> str:
     return " ".join(f"{x:.7f},{y:.7f},0" for x, y in coords)
 
 
+
+def _kml_line_geometry(geom) -> str:
+    if geom.geom_type == "LineString":
+        return f'<LineString><tessellate>1</tessellate><coordinates>{_coords_text(geom.coords)}</coordinates></LineString>'
+    if geom.geom_type == "MultiLineString":
+        parts = ''.join(
+            f'<LineString><tessellate>1</tessellate><coordinates>{_coords_text(g.coords)}</coordinates></LineString>'
+            for g in geom.geoms
+        )
+        return f'<MultiGeometry>{parts}</MultiGeometry>'
+    raise ValueError(f"未対応のルート形状です: {geom.geom_type}")
+
 def _route_properties(route: dict) -> dict:
-    excluded = {"geometry", "start_point", "requested_start", "assignments", "route_steps", "navigation_legs"}
+    excluded = {"geometry", "route_parts", "start_point", "requested_start", "assignments", "route_steps", "navigation_legs"}
     return {k: v for k, v in route.items() if k not in excluded}
 
 
@@ -40,7 +52,7 @@ def write_kml(area_name: str, boundary: Polygon, roads: list[dict], route: dict,
         style_id = ((assignment["worker_id"] - 1) % 8) + 1
         s, e = assignment["start_point"], assignment["end_point"]
         assignment_folders.append(f'''<Folder><name>{html.escape(assignment["name"])}</name>
-<Placemark><name>{html.escape(assignment["name"])} 巡回区間</name><description>{props}</description><styleUrl>#worker{style_id}</styleUrl><LineString><tessellate>1</tessellate><coordinates>{_coords_text(assignment["geometry"].coords)}</coordinates></LineString></Placemark>
+<Placemark><name>{html.escape(assignment["name"])} 巡回区間</name><description>{props}</description><styleUrl>#worker{style_id}</styleUrl>{_kml_line_geometry(assignment["geometry"])}</Placemark>
 <Placemark><name>{html.escape(assignment["name"])} 開始</name><styleUrl>#start</styleUrl><Point><coordinates>{s.x:.7f},{s.y:.7f},0</coordinates></Point></Placemark>
 <Placemark><name>{html.escape(assignment["name"])} 終了</name><Point><coordinates>{e.x:.7f},{e.y:.7f},0</coordinates></Point></Placemark></Folder>''')
     assignment_section = f'<Folder><name>05 担当別ルート</name>{"".join(assignment_folders)}</Folder>' if assignment_folders else ""
@@ -54,7 +66,7 @@ def write_kml(area_name: str, boundary: Polygon, roads: list[dict], route: dict,
 {worker_styles}
 <Folder><name>01 区画</name><Placemark><name>{html.escape(area_name)}</name><styleUrl>#area</styleUrl><Polygon><outerBoundaryIs><LinearRing><coordinates>{_coords_text(boundary.exterior.coords)}</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark></Folder>
 <Folder><name>02 対象道路</name>{''.join(road_placemarks)}</Folder>
-<Folder><name>03 巡回ルート</name><Placemark><name>{html.escape(area_name)} 巡回ルート</name><description>{desc}</description><styleUrl>#route</styleUrl><LineString><tessellate>1</tessellate><coordinates>{_coords_text(route["geometry"].coords)}</coordinates></LineString></Placemark></Folder>
+<Folder><name>03 巡回ルート</name><Placemark><name>{html.escape(area_name)} 巡回ルート</name><description>{desc}</description><styleUrl>#route</styleUrl>{_kml_line_geometry(route["geometry"])}</Placemark></Folder>
 <Folder><name>04 開始地点</name><Placemark><name>開始地点</name><styleUrl>#start</styleUrl><Point><coordinates>{start.x:.7f},{start.y:.7f},0</coordinates></Point></Placemark></Folder>
 {assignment_section}
 </Document></kml>'''

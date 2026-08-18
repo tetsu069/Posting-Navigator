@@ -45,9 +45,14 @@ def test_route_never_draws_fake_transfer_between_disconnected_components():
         {"id": 1, "highway": "residential", "name": "A", "geometry": LineString([(139.0,35.0),(139.001,35.0)])},
         {"id": 2, "highway": "residential", "name": "B", "geometry": LineString([(139.01,35.0),(139.011,35.0)])},
     ]
-    # v1.1.8: partial coverage must never be displayed as a completed route.
-    with pytest.raises(ValueError, match="最後まで巡回できません"):
-        generate_route(roads, start_point=(139.0,35.0))
+    r = generate_route(roads, start_point=(139.0,35.0))
+    assert r["component_count"] == 2
+    assert r["cluster_count"] == 2
+    assert r["manual_transfer_count"] == 1
+    assert r["geometry"].geom_type == "MultiLineString"
+    # disconnected components remain separate geometries: no fake straight connector.
+    assert len(r["geometry"].geoms) == 2
+    assert any(leg.get("component_break_before") for leg in r["navigation_legs"])
 
 
 def test_navigation_legs_follow_road_geometry():
