@@ -1013,7 +1013,7 @@ def _route_parts_from_steps(steps: list[dict]) -> list[LineString]:
 
 
 def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
-    """v1.2.0 現場向け蛇行・袋小路即処理ルート。
+    """v1.2.1 現場向け蛇行・袋小路即処理ルート。
 
     配布対象道路が複数の連結成分に分かれていても、1成分ずつ完全に処理して
     近い次成分へ進む。移動可能な場合は full_graph の実道路だけを使う。
@@ -1105,11 +1105,12 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
                 )
             except nx.NetworkXError:
                 pass
+            # Render free tier対策: 探索数を大幅に制限する。
             try:
                 candidate_trails.append(
                     _turn_aware_euler_trail(
                         routed, comp_start, candidate_end,
-                        samples=160, radial=radial,
+                        samples=24, radial=radial,
                     )
                 )
             except nx.NetworkXError:
@@ -1188,7 +1189,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "block-completion-comb-grid-sweep",
         "component_routing": "hierarchical-component-completion",
-        "routing_strategy_version": "1.2.0",
+        "routing_strategy_version": "1.2.1",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
