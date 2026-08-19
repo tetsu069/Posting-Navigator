@@ -552,6 +552,65 @@ def _turn_aware_euler_trail(g: nx.MultiGraph, start, end=None, samples: int = 96
 
 
 
+
+def _prune_redundant_duplicate_backtracks(trail: list[tuple]) -> list[tuple]:
+    """Remove closed back-and-forth excursions made only from duplicated edges.
+
+    Chinese-Postman eulerization adds duplicate edges for parity.  A valid Euler
+    ordering can place those copies as ``A->B, B->A`` even when this adds no
+    coverage at all.  For field work that is pure waste.  Such a two-edge loop
+    starts and ends at the same node, so deleting it preserves continuity and
+    still covers every *required* edge because both removed edges are duplicate
+    copies only.
+
+    The pass is iterative because deleting one bubble can expose another one.
+    True dead-end service remains intact: the outward required edge is never
+    removed; only duplicate-copy loops are eligible.
+    """
+    rows = list(trail)
+    changed = True
+    while changed and len(rows) >= 2:
+        changed = False
+        out = []
+        i = 0
+        while i < len(rows):
+            if i + 1 < len(rows):
+                a = rows[i]
+                b = rows[i + 1]
+                u, v, _, da = a
+                u2, v2, _, db = b
+                if (
+                    u == v2 and v == u2
+                    and bool(da.get("duplicated"))
+                    and bool(db.get("duplicated"))
+                ):
+                    # Removing the pair leaves us at the same node u.
+                    changed = True
+                    i += 2
+                    continue
+            out.append(rows[i])
+            i += 1
+        rows = out
+    return rows
+
+
+def _redundant_oscillation_count(trail: list[tuple]) -> int:
+    """Count short A<->B oscillations involving parity-duplicate edges."""
+    bad = 0
+    for a, b in zip(trail, trail[1:]):
+        u, v, _, da = a
+        u2, v2, _, db = b
+        if u == v2 and v == u2 and (da.get("duplicated") or db.get("duplicated")):
+            bad += 1
+    # Also punish A->B, B->A, A->B three-step ping-pong very heavily.
+    for i in range(len(trail) - 2):
+        a, b, c = trail[i:i+3]
+        u, v, _, da = a; u2, v2, _, db = b; u3, v3, _, dc = c
+        if u == v2 and v == u2 and u2 == v3 and v2 == u3:
+            if da.get("duplicated") or db.get("duplicated") or dc.get("duplicated"):
+                bad += 4
+    return bad
+
 def _undirected_angle_diff(a: float, b: float) -> float:
     """0..90deg. bearingは向きを無視して比較する。"""
     d = abs(((a - b + 90.0) % 180.0) - 90.0)
@@ -751,6 +810,7 @@ def _local_completion_euler_trail(g: nx.MultiGraph, start, end=None, radial: dic
 def _local_completion_quality(trail: list[tuple], radial: dict | None = None, base_degrees: dict | None = None) -> tuple:
     """既存qualityに『同じ交差点/局所へ後から戻る』ペナルティを追加。"""
     base = _trail_quality(trail, radial=radial)
+    oscillation = _redundant_oscillation_count(trail)
     bad_reverse = 0
     if base_degrees is not None:
         for a, b in zip(trail, trail[1:]):
@@ -770,7 +830,7 @@ def _local_completion_quality(trail: list[tuple], radial: dict | None = None, ba
                 if gap >= 18:
                     long_revisits += 1
             last_visit[n] = i
-    return (bad_reverse, long_revisits, revisits) + base
+    return (oscillation, bad_reverse, long_revisits, revisits) + base
 
 def _cluster_exit_node(comp_graph: nx.MultiGraph, cluster_graph: nx.MultiGraph, entry, radial: dict, next_cluster: dict | None):
     """クラスタ途中で引き返さず、次の塊へ抜けやすい交差点を出口にする。"""
@@ -1032,7 +1092,7 @@ def _route_parts_from_steps(steps: list[dict]) -> list[LineString]:
 
 
 def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
-    """v1.2.2 現場向け・非袋小路即時往復抑制ルート。
+    """v1.2.3 現場向け・重複往復除去ルート。
 
     配布対象道路が複数の連結成分に分かれていても、1成分ずつ完全に処理して
     近い次成分へ進む。移動可能な場合は full_graph の実道路だけを使う。
@@ -1137,6 +1197,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
             except nx.NetworkXError:
                 pass
             for t in candidate_trails:
+                t = _prune_redundant_duplicate_backtracks(t)
                 quality = _local_completion_quality(t, radial=radial, base_degrees=base_degrees)
                 outward_bonus = -radial.get(candidate_end, 0.0) / 5000.0
                 route_options.append((quality + (outward_bonus,), candidate_end, t))
@@ -1210,7 +1271,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "block-completion-comb-grid-sweep",
         "component_routing": "hierarchical-component-completion",
-        "routing_strategy_version": "1.2.2",
+        "routing_strategy_version": "1.2.3",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
