@@ -426,8 +426,14 @@ def _graph_from_edge_refs(g: nx.MultiGraph, refs: set) -> nx.MultiGraph:
     return out
 
 
-def _eulerize_open(g: nx.MultiGraph, start, end) -> nx.MultiGraph:
-    """start→endの開いたRoute Inspection trail用に辺を最小追加する。"""
+def _eulerize_open(g: nx.MultiGraph, start, end, connector_graph: nx.MultiGraph | None = None) -> nx.MultiGraph:
+    """start→endの開いたRoute Inspection trail用に辺を最小追加する。
+
+    v1.2.2: 奇数頂点の補完経路は、配布対象辺だけの ``g`` ではなく、
+    可能なら同じ町丁目内の歩行可能道路 ``connector_graph`` 上で求める。
+    これにより、配布対象上では袋小路に見えるだけの道路を、同じ辺の即時往復で
+    戻るのではなく、実道路を使って次の交差点へ抜けられる。
+    """
     if start == end:
         return eulerize_weighted(g)
     out = g.copy()
@@ -436,10 +442,23 @@ def _eulerize_open(g: nx.MultiGraph, start, end) -> nx.MultiGraph:
     if not toggle:
         return out
     toggle = list(toggle)
-    for u, v, path in _minimum_pairing_paths(out, toggle):
+
+    pairing_graph = connector_graph if connector_graph is not None else out
+    try:
+        pairings = _minimum_pairing_paths(pairing_graph, toggle)
+    except Exception:
+        # connector側の分断などがあれば従来方式へ安全にフォールバック。
+        pairings = _minimum_pairing_paths(out, toggle)
+        pairing_graph = out
+
+    for u, v, path in pairings:
         for a, b in zip(path, path[1:]):
-            edge_data = dict(min(out.get_edge_data(a, b).values(), key=lambda d: d.get("route_cost", math.inf)))
+            keyed = pairing_graph.get_edge_data(a, b)
+            if not keyed:
+                raise ValueError("補完経路が実道路グラフ上にありません")
+            edge_data = dict(min(keyed.values(), key=lambda d: d.get("route_cost", math.inf)))
             edge_data["duplicated"] = True
+            edge_data["connector_only"] = not out.has_edge(a, b)
             out.add_edge(a, b, **edge_data)
     return out
 
@@ -1013,7 +1032,7 @@ def _route_parts_from_steps(steps: list[dict]) -> list[LineString]:
 
 
 def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
-    """v1.2.1 現場向け蛇行・袋小路即処理ルート。
+    """v1.2.2 現場向け・非袋小路即時往復抑制ルート。
 
     配布対象道路が複数の連結成分に分かれていても、1成分ずつ完全に処理して
     近い次成分へ進む。移動可能な場合は full_graph の実道路だけを使う。
@@ -1083,7 +1102,9 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         comp_graph = required_graph.subgraph(nodes).copy()
         _assign_local_sweep_blocks(comp_graph, comp_start, cell_m=220.0)
         radial = _node_radial_distances(comp_graph, comp_start)
-        base_degrees = dict(comp_graph.degree())
+        # 配布対象上の次数ではなく、実際の歩行可能道路網での次数を使う。
+        # 配布フィルタのせいで「見かけ上の袋小路」になった地点での即時往復を防ぐ。
+        base_degrees = {n: full_graph.degree(n) if n in full_graph else comp_graph.degree(n) for n in comp_graph.nodes}
         raw_end_candidates = [n for n in comp_graph.nodes if comp_graph.degree(n) != 2 and n != comp_start] or [n for n in comp_graph.nodes if n != comp_start]
         end_candidates = sorted(raw_end_candidates, key=lambda n: radial.get(n, 0.0), reverse=True)[:min(24, len(raw_end_candidates))]
         if not end_candidates:
@@ -1092,7 +1113,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         route_options = []
         for candidate_end in end_candidates:
             try:
-                routed = _eulerize_open(comp_graph, comp_start, candidate_end)
+                routed = _eulerize_open(comp_graph, comp_start, candidate_end, connector_graph=full_graph)
             except Exception:
                 continue
             candidate_trails = []
@@ -1189,7 +1210,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "block-completion-comb-grid-sweep",
         "component_routing": "hierarchical-component-completion",
-        "routing_strategy_version": "1.2.1",
+        "routing_strategy_version": "1.2.2",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
