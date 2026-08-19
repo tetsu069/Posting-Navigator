@@ -42,7 +42,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.2.3 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.2.4 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -255,11 +255,13 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
     fwd, inv = _metric_transformers(boundary)
     boundary_m = transform(fwd, boundary)
     boundary_line = boundary_m.boundary
-    # v1.1.9: 巡回対象は町丁目ポリゴンの内側へ厳密にクリップする。
-    # 境界外の中心線を「近いから」という理由だけで救済すると、縁から外向きの
-    # 不要な往復が発生するため、外側バンドは巡回対象にしない。
+    # v1.2.4: 基本は町丁目内へ厳密にクリップするが、行政境界が道路端に置かれて
+    # OSM道路中心線だけが数m外側になるケースは「境界道路」として救済する。
+    # 救済は境界にほぼ平行な実道路だけ。境界から外向きに伸びる枝道は採用しない。
     inside_region = boundary_m
-    boundary_corridor = boundary_m.buffer(2.0)
+    boundary_rescue_m = 5.0
+    boundary_corridor = boundary_m.buffer(boundary_rescue_m)
+    outside_boundary_band = boundary_corridor.difference(boundary_m)
 
     park_polys = []
     for element in data.get("elements", []):
@@ -299,12 +301,18 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
             continue
         line_m = transform(fwd, LineString(coords))
 
-        # まず町丁目内だけを採用。境界の中心線誤差だけ後段で救済する。
+        # まず町丁目内を採用。
         chunks: list[tuple[LineString, bool]] = [(g, False) for g in _as_lines(line_m.intersection(inside_region)) if g.length >= 0.5]
 
-        # v1.1.9: 境界外の道路中心線は巡回対象へ追加しない。
-        # 境界道路の取りこぼしよりも「エリア外へ出るルートを作らない」ことを優先する。
-        # 境界を横切る道路は上の exact intersection により、内側部分だけが残る。
+        # v1.2.4: 境界道路救済。道路中心線が町丁目の数m外にあっても、
+        # 1) 境界5m以内、2) 境界とほぼ平行、3) 生活道路系、を満たす部分だけ追加する。
+        # これにより青い境界だけ残る箇所を巡回対象へ戻しつつ、外向き枝道は除外する。
+        boundary_rescue_highways = residential_required | {"service", "pedestrian", "footway"}
+        if highway in boundary_rescue_highways:
+            outside_parts = [g for g in _as_lines(line_m.intersection(outside_boundary_band)) if g.length >= 3.0]
+            for outside_part in outside_parts:
+                if _is_boundary_parallel(outside_part, boundary_line, boundary_rescue_m):
+                    chunks.append((outside_part, True))
 
         for geom_m, boundary_near in chunks:
             if geom_m.length < 0.5:
