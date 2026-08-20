@@ -29,12 +29,12 @@ def test_boundary_parallel_residential_rescued_but_outward_branch_not_added():
     assert not any(r["id"]==2 for r in roads)
 
 
-def test_major_road_is_connector_only_not_required():
+def test_major_road_is_required_for_complete_coverage():
     b=box(139,35,139.01,35.01)
     data={"elements":[way(1,{"highway":"primary"},[(139.001,35.005),(139.009,35.005)]),
                       way(2,{"highway":"residential"},[(139.002,35.004),(139.002,35.006)])]}
     roads=osm_json_to_lines(data,b)
-    assert all(r["required"] is False for r in roads if r["id"]==1)
+    assert all(r["required"] is True for r in roads if r["id"]==1)
     assert any(r["required"] is True for r in roads if r["id"]==2)
 
 

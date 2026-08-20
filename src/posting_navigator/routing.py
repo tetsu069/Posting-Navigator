@@ -1092,7 +1092,7 @@ def _route_parts_from_steps(steps: list[dict]) -> list[LineString]:
 
 
 def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
-    """v1.2.9 現場向け・未巡回ゼロ保証ルート。
+    """v1.3.0 現場向け・未巡回ゼロ保証ルート。
 
     配布対象道路が複数の連結成分に分かれていても、1成分ずつ完全に処理して
     近い次成分へ進む。移動可能な場合は full_graph の実道路だけを使う。
@@ -1230,7 +1230,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
     if not steps:
         raise ValueError("巡回ルートを生成できませんでした")
 
-    # v1.2.9: 未巡回道路ゼロ保証。required_graph の各道路区間について、
+    # v1.3.0: 未巡回道路ゼロ保証。required_graph の各道路区間について、
     # 生成されたstepのGeometryが同じ区間を実際に通過しているか最終照合する。
     # Euler化の内部都合で取りこぼしが発生した場合は「完成」にしない。
     def _edge_sig(u, v, geom):
@@ -1298,7 +1298,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "block-completion-comb-grid-sweep",
         "component_routing": "hierarchical-component-completion",
-        "routing_strategy_version": "1.2.9",
+        "routing_strategy_version": "1.3.0",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }

@@ -42,7 +42,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.2.9 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.3.0 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -398,7 +398,14 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
         # v1.2.5: 境界道路救済。道路中心線が町丁目の数m外にあっても、
         # 1) 境界7.5m以内、2) 境界とほぼ平行、3) 生活道路系、を満たす部分だけ追加する。
         # これにより青い境界だけ残る箇所を巡回対象へ戻しつつ、外向き枝道は除外する。
-        boundary_rescue_highways = residential_required | {"service", "pedestrian", "footway", "road", "track"}
+        # v1.3.0: 境界沿いも道路種別で落とさない。Overpassで取得した highway のうち
+        # EXCLUDED_HIGHWAYS/cycleway以外は、境界と平行な局所runなら救済候補にする。
+        boundary_rescue_highways = {
+            "residential", "living_street", "unclassified", "track", "service",
+            "pedestrian", "footway", "path", "steps", "road",
+            "primary", "primary_link", "secondary", "secondary_link",
+            "tertiary", "tertiary_link"
+        }
         if highway in boundary_rescue_highways:
             # way全体で判定すると、途中で曲がる長い道路の境界沿い部分まで落ちる。
             # 7.5m帯の中を局所線分ごとに判定し、平行に続くrunだけ救済する。
@@ -449,7 +456,11 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
             # これにより service/driveway/parking_aisle/road/track/歩行者道路など、
             # OSMベースマップ上で実際に通れる細街路を completeness 対象に含める。
             if not boundary_clip_tail:
-                explicitly_optional = highway in major or highway == "cycleway"
+                # v1.3.0: 町丁目内に存在する OSM highway は「太い道路だから」という理由で
+                # coverage から外さない。primary/secondary/tertiary も最低1回は通る。
+                # これまで major を optional にしていたことが、地図上に道路があるのに
+                # 巡回線が載らない大きな原因だった。
+                explicitly_optional = highway == "cycleway"
                 park_only_walkway = highway in walk_required and in_park_ratio >= 0.65
                 park_only_service = highway == "service" and in_park_ratio >= 0.90
                 if not (explicitly_optional or park_only_walkway or park_only_service):
@@ -458,7 +469,7 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
             # 境界救済道路も、境界に平行な局所runとして採用済みなら配布対象へ。
             # 15mまで許容する代わりに _parallel_boundary_runs 側で方向・距離変化を
             # 厳格確認するため、外向き枝はここへ入らない。
-            if boundary_near and highway not in major and highway != "cycleway":
+            if boundary_near and highway != "cycleway":
                 if not (highway in walk_required and in_park_ratio >= 0.65):
                     required = True
 

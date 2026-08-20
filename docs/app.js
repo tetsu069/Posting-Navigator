@@ -52,7 +52,7 @@ function renderAreaBoundaries(fitSelected=false){
     style:f=>{
       const active=f.properties?.name===selected;
       return active
-        ? {color:'#2563eb',weight:4,opacity:.95,fillColor:'#3b82f6',fillOpacity:.14}
+        ? {color:'#94a3b8',weight:2,opacity:.48,fillColor:'#cbd5e1',fillOpacity:.08}
         : {color:'#64748b',weight:1.5,opacity:.65,fillColor:'#94a3b8',fillOpacity:.035};
     },
     onEachFeature:(f,layer)=>{
@@ -102,7 +102,7 @@ function renderGeneratedMap(){
     filter:f=>{const k=f.properties?.kind;return k!=='navigation_leg' && !(hasSteps&&(k==='route'||k==='worker_route'))},
     style:f=>{
       const k=f.properties?.kind;
-      if(k==='area')return state.areaGeojson?{weight:0,opacity:0,fillOpacity:0}:{weight:4,color:'#2563eb',opacity:.95,fillColor:'#3b82f6',fillOpacity:.14};
+      if(k==='area')return state.areaGeojson?{weight:0,opacity:0,fillOpacity:0}:{weight:2,color:'#94a3b8',opacity:.48,fillColor:'#cbd5e1',fillOpacity:.08};
       if(k==='road')return{weight:1.0,color:'#94a3b8',opacity:.20};
       if(k==='route_step'){if(f.properties.transfer)return{weight:3,color:'#64748b',opacity:.45,dashArray:'8 8'};if(f.properties.duplicated)return{weight:4,color:'#f59e0b',opacity:.58};return{weight:4,color:'#ef4444',opacity:.50}}
       return{weight:2,color:'#64748b'}
