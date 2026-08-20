@@ -42,7 +42,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.2.7 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.2.8 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -246,7 +246,7 @@ def _parallel_boundary_runs(line: LineString, boundary_line, max_dist_m: float, 
     """境界沿い道路を細分化して局所区間単位で救済する。
 
     OSM way の頂点間隔が長いと、長い線分全体の角度で判定した旧方式では
-    実際には境界に沿っている一部まで落ちる。v1.2.7 では約3mごとに
+    実際には境界に沿っている一部まで落ちる。v1.2.8 では約3mごとに
     densifyして判定し、境界と平行な連続runだけを拾う。外向き枝は拾わない。
     """
     if line.is_empty or line.length < 1.0:
@@ -373,7 +373,7 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
     parks_m = unary_union(park_polys) if park_polys else None
 
     major = {"primary", "primary_link", "secondary", "secondary_link", "tertiary", "tertiary_link"}
-    residential_required = {"residential", "living_street", "unclassified"}
+    residential_required = {"residential", "living_street", "unclassified", "track"}
     walk_required = {"pedestrian", "footway", "path", "steps"}
     
     for element in data.get("elements", []):
@@ -384,8 +384,9 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
         if not highway or highway in EXCLUDED_HIGHWAYS:
             continue
         access = tags.get("access", "")
-        if access in {"no", "private"} and highway not in {"pedestrian", "footway"}:
-            continue
+        # v1.2.8: OSM base mapに道路として描かれるエリア内道路を completeness pass で
+        # 落とさないため、access=private/no だけを理由に道路Geometry自体は捨てない。
+        # ただし後段で徒歩系・公園内道路は optional 扱いにできる。
         coords = [(pt["lon"], pt["lat"]) for pt in element["geometry"]]
         if len(coords) < 2:
             continue
@@ -397,13 +398,13 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
         # v1.2.5: 境界道路救済。道路中心線が町丁目の数m外にあっても、
         # 1) 境界7.5m以内、2) 境界とほぼ平行、3) 生活道路系、を満たす部分だけ追加する。
         # これにより青い境界だけ残る箇所を巡回対象へ戻しつつ、外向き枝道は除外する。
-        boundary_rescue_highways = residential_required | {"service", "pedestrian", "footway", "road"}
+        boundary_rescue_highways = residential_required | {"service", "pedestrian", "footway", "road", "track"}
         if highway in boundary_rescue_highways:
             # way全体で判定すると、途中で曲がる長い道路の境界沿い部分まで落ちる。
             # 7.5m帯の中を局所線分ごとに判定し、平行に続くrunだけ救済する。
             outside_geom = line_m.intersection(outside_boundary_band)
             for outside_part in _as_lines(outside_geom):
-                for run in _parallel_boundary_runs(outside_part, boundary_line, boundary_rescue_m, min_run_m=8.0):
+                for run in _parallel_boundary_runs(outside_part, boundary_line, boundary_rescue_m, min_run_m=5.0):
                     chunks.append((run, True))
 
         for geom_m, boundary_near in chunks:
@@ -429,7 +430,7 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
             if boundary_clip_tail:
                 required = False
             elif boundary_near and highway in (residential_required | {"service", "road", "pedestrian", "footway"}):
-                # v1.2.7: 境界沿いとして救済した実道路は、中心線が行政境界の外側に
+                # v1.2.8: 境界沿いとして救済した実道路は、中心線が行政境界の外側に
                 # あるという理由だけで optional に落とさない。青い境界だけ残る穴を防ぐ。
                 required = True
             elif highway in major or highway == "cycleway":
@@ -438,8 +439,17 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
                 required = False
             elif highway == "service" and in_park_ratio >= 0.35:
                 required = False
-            elif highway not in residential_required | walk_required | {"service", "road"}:
+            elif highway not in residential_required | walk_required | {"service", "road", "track"}:
                 required = False
+
+            # v1.2.8 completeness pass:
+            # エリア内に実在する車両通行可能な道路は、フィルタ条件の取りこぼしで
+            # required=False にならないよう最後に強制復帰する。公園内の徒歩園路・
+            # 幹線道路・cycleway は従来どおり除外する。
+            vehicular_complete = residential_required | {"service", "road", "track"}
+            if (not boundary_near) and highway in vehicular_complete and not boundary_clip_tail:
+                if not (highway == "service" and in_park_ratio >= 0.80):
+                    required = True
 
             geom = transform(inv, geom_m)
             roads.append({

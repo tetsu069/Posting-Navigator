@@ -29,7 +29,7 @@ def test_outward_branch_near_boundary_is_not_rescued():
 
 def test_far_parallel_outside_road_is_not_rescued():
     boundary = box(139.0, 35.0, 139.001, 35.001)
-    # 約12m外。v1.2.7の10m救済でも遠すぎる。
+    # 約12m外。v1.2.8の10m救済でも遠すぎる。
     y = 35.001108
     roads = osm_json_to_lines({"elements": [_way(103, [(139.0001, y), (139.0009, y)])]}, boundary)
     assert all(r["id"] != 103 for r in roads)
