@@ -42,7 +42,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.2.6 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.2.7 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -242,39 +242,52 @@ def _is_boundary_parallel(chunk: LineString, boundary_line, max_dist_m: float) -
 
 
 
-def _parallel_boundary_runs(line: LineString, boundary_line, max_dist_m: float, min_run_m: float = 8.0) -> list[LineString]:
-    """道路wayのうち境界に沿っている局所区間だけを抽出する。
+def _parallel_boundary_runs(line: LineString, boundary_line, max_dist_m: float, min_run_m: float = 4.0) -> list[LineString]:
+    """境界沿い道路を細分化して局所区間単位で救済する。
 
-    way全体が途中で曲がっていても、境界沿い部分だけを救済する。これにより
-    長い境界道路の一部が抜ける一方、境界から外向きに折れる枝は拾わない。
+    OSM way の頂点間隔が長いと、長い線分全体の角度で判定した旧方式では
+    実際には境界に沿っている一部まで落ちる。v1.2.7 では約3mごとに
+    densifyして判定し、境界と平行な連続runだけを拾う。外向き枝は拾わない。
     """
-    coords = list(line.coords)
-    if len(coords) < 2:
+    if line.is_empty or line.length < 1.0:
         return []
-    good = []
-    for a, b in zip(coords, coords[1:]):
-        seg = LineString([a, b])
-        if seg.length < 0.75:
+
+    # 最大3m程度の短い線分へ分割。Shapely 2 の segmentize に依存しない。
+    step = 3.0
+    distances = [0.0]
+    d = step
+    while d < line.length:
+        distances.append(d)
+        d += step
+    distances.append(line.length)
+    pts = [line.interpolate(d) for d in distances]
+
+    good: list[LineString] = []
+    for a, b in zip(pts, pts[1:]):
+        seg = LineString([(a.x, a.y), (b.x, b.y)])
+        if seg.length < 0.5:
             continue
         mid = seg.interpolate(0.5, normalized=True)
-        d0 = boundary_line.distance(Point(a))
-        d1 = boundary_line.distance(Point(b))
-        dm = boundary_line.distance(mid)
-        if max(d0, d1, dm) > max_dist_m + 0.35:
+        ds = [boundary_line.distance(a), boundary_line.distance(mid), boundary_line.distance(b)]
+        if max(ds) > max_dist_m + 0.4:
             continue
-        if max(d0, d1, dm) - min(d0, d1, dm) > 2.5:
+        # 境界から離れていく短い枝は除外。曲線道路には少し余裕を持たせる。
+        if max(ds) - min(ds) > 3.75:
             continue
         road_angle = _line_angle(seg)
-        tangent_angle = _boundary_tangent_angle(boundary_line, mid)
-        if _angle_diff_deg(road_angle, tangent_angle) > 28.0:
+        tangent_angle = _boundary_tangent_angle(boundary_line, mid, sample_m=7.5)
+        if _angle_diff_deg(road_angle, tangent_angle) > 40.0:
             continue
         good.append(seg)
+
     if not good:
         return []
     unioned = unary_union(good)
-    merged = unioned if unioned.geom_type == "LineString" else linemerge(unioned)
-    runs = _as_lines(merged)
-    return [g for g in runs if g.length >= min_run_m]
+    try:
+        merged = unioned if unioned.geom_type == "LineString" else linemerge(unioned)
+    except Exception:
+        merged = unioned
+    return [g for g in _as_lines(merged) if g.length >= min_run_m]
 
 def _endpoint_boundary_distance(line: LineString, boundary_line) -> tuple[float, float]:
     coords = list(line.coords)
@@ -337,7 +350,7 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
     # OSM道路中心線だけが数m外側になるケースは「境界道路」として救済する。
     # 救済は境界にほぼ平行な実道路だけ。境界から外向きに伸びる枝道は採用しない。
     inside_region = boundary_m
-    boundary_rescue_m = 7.5
+    boundary_rescue_m = 10.0
     boundary_corridor = boundary_m.buffer(boundary_rescue_m)
     outside_boundary_band = boundary_corridor.difference(boundary_m)
 
@@ -362,8 +375,7 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
     major = {"primary", "primary_link", "secondary", "secondary_link", "tertiary", "tertiary_link"}
     residential_required = {"residential", "living_street", "unclassified"}
     walk_required = {"pedestrian", "footway", "path", "steps"}
-    parking_services = {"parking_aisle"}
-
+    
     for element in data.get("elements", []):
         if element.get("type") != "way" or "geometry" not in element:
             continue
@@ -385,7 +397,7 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
         # v1.2.5: 境界道路救済。道路中心線が町丁目の数m外にあっても、
         # 1) 境界7.5m以内、2) 境界とほぼ平行、3) 生活道路系、を満たす部分だけ追加する。
         # これにより青い境界だけ残る箇所を巡回対象へ戻しつつ、外向き枝道は除外する。
-        boundary_rescue_highways = residential_required | {"service", "pedestrian", "footway"}
+        boundary_rescue_highways = residential_required | {"service", "pedestrian", "footway", "road"}
         if highway in boundary_rescue_highways:
             # way全体で判定すると、途中で曲がる長い道路の境界沿い部分まで落ちる。
             # 7.5m帯の中を局所線分ごとに判定し、平行に続くrunだけ救済する。
@@ -416,15 +428,17 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
             )
             if boundary_clip_tail:
                 required = False
+            elif boundary_near and highway in (residential_required | {"service", "road", "pedestrian", "footway"}):
+                # v1.2.7: 境界沿いとして救済した実道路は、中心線が行政境界の外側に
+                # あるという理由だけで optional に落とさない。青い境界だけ残る穴を防ぐ。
+                required = True
             elif highway in major or highway == "cycleway":
-                required = False
-            elif highway == "service" and service in parking_services:
                 required = False
             elif highway in walk_required and in_park_ratio >= 0.25:
                 required = False
             elif highway == "service" and in_park_ratio >= 0.35:
                 required = False
-            elif highway not in residential_required | walk_required | {"service"}:
+            elif highway not in residential_required | walk_required | {"service", "road"}:
                 required = False
 
             geom = transform(inv, geom_m)
