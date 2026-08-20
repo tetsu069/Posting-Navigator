@@ -1092,7 +1092,7 @@ def _route_parts_from_steps(steps: list[dict]) -> list[LineString]:
 
 
 def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
-    """v1.2.8 現場向け・重複往復除去ルート。
+    """v1.2.9 現場向け・未巡回ゼロ保証ルート。
 
     配布対象道路が複数の連結成分に分かれていても、1成分ずつ完全に処理して
     近い次成分へ進む。移動可能な場合は full_graph の実道路だけを使う。
@@ -1230,6 +1230,33 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
     if not steps:
         raise ValueError("巡回ルートを生成できませんでした")
 
+    # v1.2.9: 未巡回道路ゼロ保証。required_graph の各道路区間について、
+    # 生成されたstepのGeometryが同じ区間を実際に通過しているか最終照合する。
+    # Euler化の内部都合で取りこぼしが発生した場合は「完成」にしない。
+    def _edge_sig(u, v, geom):
+        a, b = sorted((tuple(u), tuple(v)))
+        coords = tuple((round(x, 6), round(y, 6)) for x, y in geom.coords)
+        rev = tuple(reversed(coords))
+        return (a, b, min(coords, rev))
+
+    required_sigs = {
+        _edge_sig(u, v, data.get("geometry", LineString([u, v])))
+        for u, v, _, data in required_graph.edges(keys=True, data=True)
+    }
+    traversed_sigs = {
+        _edge_sig(st["from"], st["to"], st["geometry"])
+        for st in steps if not st.get("transfer")
+    }
+    missing_sigs = required_sigs - traversed_sigs
+    if missing_sigs:
+        missing_len = 0.0
+        for u, v, _, data in required_graph.edges(keys=True, data=True):
+            if _edge_sig(u, v, data.get("geometry", LineString([u, v]))) in missing_sigs:
+                missing_len += float(data.get("length", 0.0))
+        raise ValueError(
+            f"配布対象道路に未巡回区間が残っています（{len(missing_sigs)}区間、約{missing_len:.0f}m）。完成扱いにしません。"
+        )
+
     parts = _route_parts_from_steps(steps)
     if not parts:
         raise ValueError("巡回ルート形状を生成できませんでした")
@@ -1271,7 +1298,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "block-completion-comb-grid-sweep",
         "component_routing": "hierarchical-component-completion",
-        "routing_strategy_version": "1.2.8",
+        "routing_strategy_version": "1.2.9",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }

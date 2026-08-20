@@ -42,7 +42,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.2.8 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.2.9 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -404,7 +404,7 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
             # 7.5m帯の中を局所線分ごとに判定し、平行に続くrunだけ救済する。
             outside_geom = line_m.intersection(outside_boundary_band)
             for outside_part in _as_lines(outside_geom):
-                for run in _parallel_boundary_runs(outside_part, boundary_line, boundary_rescue_m, min_run_m=5.0):
+                for run in _parallel_boundary_runs(outside_part, boundary_line, boundary_rescue_m, min_run_m=3.0):
                     chunks.append((run, True))
 
         for geom_m, boundary_near in chunks:
@@ -442,13 +442,24 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
             elif highway not in residential_required | walk_required | {"service", "road", "track"}:
                 required = False
 
-            # v1.2.8 completeness pass:
-            # エリア内に実在する車両通行可能な道路は、フィルタ条件の取りこぼしで
-            # required=False にならないよう最後に強制復帰する。公園内の徒歩園路・
-            # 幹線道路・cycleway は従来どおり除外する。
-            vehicular_complete = residential_required | {"service", "road", "track"}
-            if (not boundary_near) and highway in vehicular_complete and not boundary_clip_tail:
-                if not (highway == "service" and in_park_ratio >= 0.80):
+            # v1.2.9 coverage baseline:
+            # 「ルートに含める道路」の基準集合を広く定義する。個別の highway/service
+            # タグを追加し続ける方式では実道路を取りこぼすため、町丁目内に存在する
+            # highway は原則 required=True とし、明確に配布不要なものだけ除外する。
+            # これにより service/driveway/parking_aisle/road/track/歩行者道路など、
+            # OSMベースマップ上で実際に通れる細街路を completeness 対象に含める。
+            if not boundary_clip_tail:
+                explicitly_optional = highway in major or highway == "cycleway"
+                park_only_walkway = highway in walk_required and in_park_ratio >= 0.65
+                park_only_service = highway == "service" and in_park_ratio >= 0.90
+                if not (explicitly_optional or park_only_walkway or park_only_service):
+                    required = True
+
+            # 境界救済道路も、境界に平行な局所runとして採用済みなら配布対象へ。
+            # 15mまで許容する代わりに _parallel_boundary_runs 側で方向・距離変化を
+            # 厳格確認するため、外向き枝はここへ入らない。
+            if boundary_near and highway not in major and highway != "cycleway":
+                if not (highway in walk_required and in_park_ratio >= 0.65):
                     required = True
 
             geom = transform(inv, geom_m)
