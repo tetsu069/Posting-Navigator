@@ -42,7 +42,7 @@ def _headers() -> dict[str, str]:
     # 環境変数で本番URLや連絡先入り UA に差し替え可能。
     user_agent = os.getenv(
         "OVERPASS_USER_AGENT",
-        "Posting-Navigator/1.2.5 (+https://tetsu069.github.io/Posting-Navigator/)",
+        "Posting-Navigator/1.2.6 (+https://tetsu069.github.io/Posting-Navigator/)",
     ).strip()
     referer = os.getenv(
         "OVERPASS_REFERER",
@@ -307,7 +307,7 @@ def _is_short_boundary_clip_tail(chunk: LineString, original: LineString, bounda
     ほぼ直交気味に終わる場合は、配布のために往復する価値が低い。道路自体は
     connector として保持するが required=False に落とす。
     """
-    if chunk.length > 55.0:
+    if chunk.length > 12.0:
         return False
     if boundary_m.covers(original):
         return False
@@ -362,7 +362,7 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
     major = {"primary", "primary_link", "secondary", "secondary_link", "tertiary", "tertiary_link"}
     residential_required = {"residential", "living_street", "unclassified"}
     walk_required = {"pedestrian", "footway", "path", "steps"}
-    parking_services = {"parking_aisle", "driveway"}
+    parking_services = {"parking_aisle"}
 
     for element in data.get("elements", []):
         if element.get("type") != "way" or "geometry" not in element:
@@ -407,9 +407,9 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
 
             # 「通る必要がある場合だけ使える」道路は optional connector として残す。
             required = True
-            # v1.2.5: 元OSM道路が境界外へ続き、境界で切られた内側部分が短い場合、
-            # その切れ端を配布必須にすると「少し進んで同じ道を戻る」停止点になる。
-            # 道路は移動用に保持するが、巡回必須からは外す。
+            # v1.2.6: 境界クリップ末端の除外は極短い12m以下だけに限定する。
+            # 12mを超える実道路は境界で切れていても必ず巡回対象に残す。
+            # drivewayも住宅への配布動線になり得るため required=True のまま扱う。
             boundary_clip_tail = (
                 (not boundary_near)
                 and _is_short_boundary_clip_tail(geom_m, line_m, boundary_m, boundary_line)

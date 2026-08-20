@@ -9,7 +9,7 @@ def _way(i, coords, highway='residential'):
     }
 
 
-def test_short_cross_boundary_tail_is_not_required():
+def test_33m_cross_boundary_street_stays_required_in_v126():
     boundary = box(139.0, 35.0, 139.001, 35.001)
     # North boundaryを直交して外へ続くway。内側に約33mだけ残る短い切れ端。
     data = {'elements': [_way(201, [
@@ -19,8 +19,9 @@ def test_short_cross_boundary_tail_is_not_required():
     ])]}
     roads = [r for r in osm_json_to_lines(data, boundary) if r['id'] == 201]
     assert roads
-    assert any(r.get('boundary_clip_tail') for r in roads)
-    assert all(not r['required'] for r in roads if r.get('boundary_clip_tail'))
+    # v1.2.6: 33mもある実道路をstub扱いして落とさない。
+    assert all(not r.get('boundary_clip_tail') for r in roads)
+    assert any(r['required'] for r in roads)
 
 
 def test_long_cross_boundary_street_stays_required():
