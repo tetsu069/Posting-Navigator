@@ -129,6 +129,68 @@ def _minimum_pairing_paths(g: nx.MultiGraph, nodes: list) -> list[tuple[object, 
 
 
 
+
+
+def _edge_pair_key(a, b):
+    return tuple(sorted((a, b), key=repr))
+
+def _path_base_duplicate_cost(g: nx.MultiGraph, path: list) -> float:
+    total = 0.0
+    for a, b in zip(path, path[1:]):
+        keyed = g.get_edge_data(a, b) or {}
+        if not keyed:
+            return math.inf
+        total += min(float(d.get("duplicate_cost", d.get("route_cost", d.get("length", 1.0)))) for d in keyed.values())
+    return total
+
+def _congestion_aware_path(g: nx.MultiGraph, source, target, reuse: dict, *, max_detour_ratio: float = 1.45) -> list:
+    """Route one parity-duplication path while avoiding already duplicated roads.
+
+    CPP matching minimizes total duplicate distance but can send several parity paths over
+    exactly the same arterial.  For field work that produces conspicuous repeated
+    backtracking.  Keep the matched endpoints, but reroute later pair paths with a
+    super-linear reuse charge.  Never accept a detour > max_detour_ratio of the ordinary
+    shortest duplicate-cost path, so the cure cannot create a huge detour.
+    """
+    base_path = nx.shortest_path(g, source, target, weight="duplicate_cost")
+    base_cost = _path_base_duplicate_cost(g, base_path)
+
+    def weight(u, v, data):
+        # MultiGraph callable receives one key->data dict in recent networkx.
+        values = data.values() if data and all(isinstance(x, dict) for x in data.values()) else [data]
+        best = math.inf
+        for d in values:
+            c = float(d.get("duplicate_cost", d.get("route_cost", d.get("length", 1.0))))
+            r = reuse.get(_edge_pair_key(u, v), 0)
+            # Reusing a road for parity correction gets expensive very quickly.
+            c *= (1.0 + 7.0 * r + 10.0 * r * r)
+            best = min(best, c)
+        return best
+
+    try:
+        alt = nx.shortest_path(g, source, target, weight=weight)
+        alt_base = _path_base_duplicate_cost(g, alt)
+        if alt_base <= base_cost * max_detour_ratio + 1e-6:
+            return alt
+    except Exception:
+        pass
+    return base_path
+
+def _spread_pairing_paths(g: nx.MultiGraph, pairings: list[tuple[object, object, list]]) -> list[tuple[object, object, list]]:
+    """Reroute parity pairings to minimize repeated use of the same physical roads."""
+    reuse: dict = {}
+    # Hard/long pairs first; later flexible pairs route around roads already duplicated.
+    rows = sorted(pairings, key=lambda x: _path_base_duplicate_cost(g, x[2]), reverse=True)
+    out = []
+    for u, v, original in rows:
+        path = _congestion_aware_path(g, u, v, reuse)
+        for a, b in zip(path, path[1:]):
+            key = _edge_pair_key(a, b)
+            reuse[key] = reuse.get(key, 0) + 1
+        out.append((u, v, path))
+    return out
+
+
 def _dist_m(a: tuple[float, float], b: tuple[float, float]) -> float:
     return abs(GEOD.inv(a[0], a[1], b[0], b[1])[2])
 
@@ -256,10 +318,15 @@ def eulerize_weighted(g: nx.MultiGraph) -> nx.MultiGraph:
     odd = [n for n, degree in g.degree() if degree % 2 == 1]
     if not odd:
         return g
-    for u, v, path in _minimum_pairing_paths(g, odd):
+    pairings = _spread_pairing_paths(g, _minimum_pairing_paths(g, odd))
+    duplicate_use = {}
+    for u, v, path in pairings:
         for a, b in zip(path, path[1:]):
             edge_data = dict(min(g.get_edge_data(a, b).values(), key=lambda d: d.get("route_cost", math.inf)))
             edge_data["duplicated"] = True
+            ek = _edge_pair_key(a, b)
+            duplicate_use[ek] = duplicate_use.get(ek, 0) + 1
+            edge_data["duplicate_rank"] = duplicate_use[ek]
             g.add_edge(a, b, **edge_data)
     return g
 
@@ -478,6 +545,10 @@ def _eulerize_open(g: nx.MultiGraph, start, end, connector_graph: nx.MultiGraph 
         pairings = _minimum_pairing_paths(out, toggle)
         pairing_graph = out
 
+    # v1.3.3: endpoint matching is kept, but parity paths are spread across the
+    # street network instead of repeatedly piling onto the same arterial.
+    pairings = _spread_pairing_paths(pairing_graph, pairings)
+    duplicate_use = {}
     for u, v, path in pairings:
         for a, b in zip(path, path[1:]):
             keyed = pairing_graph.get_edge_data(a, b)
@@ -485,6 +556,9 @@ def _eulerize_open(g: nx.MultiGraph, start, end, connector_graph: nx.MultiGraph 
                 raise ValueError("補完経路が実道路グラフ上にありません")
             edge_data = dict(min(keyed.values(), key=lambda d: d.get("route_cost", math.inf)))
             edge_data["duplicated"] = True
+            ek = _edge_pair_key(a, b)
+            duplicate_use[ek] = duplicate_use.get(ek, 0) + 1
+            edge_data["duplicate_rank"] = duplicate_use[ek]
             edge_data["connector_only"] = not out.has_edge(a, b)
             out.add_edge(a, b, **edge_data)
     return out
@@ -837,7 +911,7 @@ def _local_completion_euler_trail(g: nx.MultiGraph, start, end=None, radial: dic
 def _local_completion_quality(trail: list[tuple], radial: dict | None = None, base_degrees: dict | None = None) -> tuple:
     """現場品質を比較する。
 
-    v1.3.2: 「歩きやすさ」のために数百mの余分な往復を許すのは本末転倒なので、
+    v1.3.3: 「歩きやすさ」のために数百mの余分な往復を許すのは本末転倒なので、
     即時ピンポン/交差点Uターンの次に *重複実距離* を最優先する。これにより
     GOAL候補の違いで必要以上に同じ幹線・長い道路を往復する候補を落とす。
     """
@@ -856,6 +930,13 @@ def _local_completion_quality(trail: list[tuple], radial: dict | None = None, ba
         if d.get("duplicated") and d.get("highway") in {"primary", "primary_link", "secondary", "secondary_link", "tertiary", "tertiary_link"}
     )
     duplicate_edges = sum(1 for _, _, _, d in trail if d.get("duplicated"))
+    duplicate_concentration = {}
+    for u, v, _, d in trail:
+        if d.get("duplicated"):
+            ek = _edge_pair_key(u, v)
+            duplicate_concentration[ek] = duplicate_concentration.get(ek, 0) + 1
+    max_duplicate_on_one_road = max(duplicate_concentration.values(), default=0)
+    repeated_duplicate_roads = sum(1 for c in duplicate_concentration.values() if c > 1)
     last_visit = {}
     revisits = 0
     long_revisits = 0
@@ -872,6 +953,7 @@ def _local_completion_quality(trail: list[tuple], radial: dict | None = None, ba
     # long_revisits等を先にすると「見た目の局所性」のために長い往復を選び得る。
     return (
         oscillation, bad_reverse,
+        max_duplicate_on_one_road, repeated_duplicate_roads,
         round(major_duplicate_m, 1), round(duplicate_m, 1), duplicate_edges,
         long_revisits, revisits,
     ) + base
@@ -1136,7 +1218,7 @@ def _route_parts_from_steps(steps: list[dict]) -> list[LineString]:
 
 
 def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
-    """v1.3.2 現場向け・重複最小化＋未巡回ゼロ保証ルート。
+    """v1.3.3 現場向け・重複最小化＋未巡回ゼロ保証ルート。
 
     配布対象道路が複数の連結成分に分かれていても、1成分ずつ完全に処理して
     近い次成分へ進む。移動可能な場合は full_graph の実道路だけを使う。
@@ -1343,7 +1425,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "block-completion-comb-grid-sweep",
         "component_routing": "hierarchical-component-completion",
-        "routing_strategy_version": "1.3.2",
+        "routing_strategy_version": "1.3.3",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
