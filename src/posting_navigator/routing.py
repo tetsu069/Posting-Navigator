@@ -835,7 +835,12 @@ def _local_completion_euler_trail(g: nx.MultiGraph, start, end=None, radial: dic
 
 
 def _local_completion_quality(trail: list[tuple], radial: dict | None = None, base_degrees: dict | None = None) -> tuple:
-    """既存qualityに『同じ交差点/局所へ後から戻る』ペナルティを追加。"""
+    """現場品質を比較する。
+
+    v1.3.2: 「歩きやすさ」のために数百mの余分な往復を許すのは本末転倒なので、
+    即時ピンポン/交差点Uターンの次に *重複実距離* を最優先する。これにより
+    GOAL候補の違いで必要以上に同じ幹線・長い道路を往復する候補を落とす。
+    """
     base = _trail_quality(trail, radial=radial)
     oscillation = _redundant_oscillation_count(trail)
     bad_reverse = 0
@@ -845,6 +850,12 @@ def _local_completion_quality(trail: list[tuple], radial: dict | None = None, ba
             a2, b2, _, _ = b
             if u == b2 and v == a2 and base_degrees.get(v, 0) > 1:
                 bad_reverse += 1
+    duplicate_m = sum(float(d.get("length", 0.0)) for _, _, _, d in trail if d.get("duplicated"))
+    major_duplicate_m = sum(
+        float(d.get("length", 0.0)) for _, _, _, d in trail
+        if d.get("duplicated") and d.get("highway") in {"primary", "primary_link", "secondary", "secondary_link", "tertiary", "tertiary_link"}
+    )
+    duplicate_edges = sum(1 for _, _, _, d in trail if d.get("duplicated"))
     last_visit = {}
     revisits = 0
     long_revisits = 0
@@ -857,7 +868,13 @@ def _local_completion_quality(trail: list[tuple], radial: dict | None = None, ba
                 if gap >= 18:
                     long_revisits += 1
             last_visit[n] = i
-    return (oscillation, bad_reverse, long_revisits, revisits) + base
+    # lexicographic: 明白な往復をまず禁止し、その次に実際の重複距離を削る。
+    # long_revisits等を先にすると「見た目の局所性」のために長い往復を選び得る。
+    return (
+        oscillation, bad_reverse,
+        round(major_duplicate_m, 1), round(duplicate_m, 1), duplicate_edges,
+        long_revisits, revisits,
+    ) + base
 
 def _cluster_exit_node(comp_graph: nx.MultiGraph, cluster_graph: nx.MultiGraph, entry, radial: dict, next_cluster: dict | None):
     """クラスタ途中で引き返さず、次の塊へ抜けやすい交差点を出口にする。"""
@@ -1119,7 +1136,7 @@ def _route_parts_from_steps(steps: list[dict]) -> list[LineString]:
 
 
 def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
-    """v1.3.1 現場向け・未巡回ゼロ保証ルート。
+    """v1.3.2 現場向け・重複最小化＋未巡回ゼロ保証ルート。
 
     配布対象道路が複数の連結成分に分かれていても、1成分ずつ完全に処理して
     近い次成分へ進む。移動可能な場合は full_graph の実道路だけを使う。
@@ -1226,6 +1243,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
             for t in candidate_trails:
                 t = _prune_redundant_duplicate_backtracks(t)
                 quality = _local_completion_quality(t, radial=radial, base_degrees=base_degrees)
+                # outwardは完全な同点時だけ。遠くで終えるために重複距離を増やさない。
                 outward_bonus = -radial.get(candidate_end, 0.0) / 5000.0
                 route_options.append((quality + (outward_bonus,), candidate_end, t))
         if not route_options:
@@ -1325,7 +1343,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "block-completion-comb-grid-sweep",
         "component_routing": "hierarchical-component-completion",
-        "routing_strategy_version": "1.3.1",
+        "routing_strategy_version": "1.3.2",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
