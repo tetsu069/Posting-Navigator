@@ -29,6 +29,27 @@ HIGHWAY_PENALTY = {
     "cycleway": 1.3,
 }
 
+# v1.3.1: 1回目のカバレッジでは全道路を通すが、奇数頂点調整のための
+# 「2回目以降の重複通行」は別コストで強く抑制する。特に幹線・境界道路を
+# 長距離往復するより、少し遠回りでも住宅街の未重複/低重複経路を選ぶ。
+DUPLICATE_PENALTY = {
+    "primary": 35.0,
+    "primary_link": 35.0,
+    "secondary": 24.0,
+    "secondary_link": 24.0,
+    "tertiary": 12.0,
+    "tertiary_link": 12.0,
+    "unclassified": 2.2,
+    "residential": 1.0,
+    "living_street": 1.0,
+    "service": 1.4,
+    "pedestrian": 1.2,
+    "footway": 1.8,
+    "path": 2.0,
+    "steps": 2.5,
+    "cycleway": 2.0,
+}
+
 EXACT_MATCHING_MAX_NODES = 24
 
 def _nearest_target_path_low_memory(g: nx.MultiGraph, source, targets: set) -> tuple[object, list, float]:
@@ -56,7 +77,7 @@ def _nearest_target_path_low_memory(g: nx.MultiGraph, source, targets: set) -> t
         for v, keyed in g.adj[u].items():
             if v in settled:
                 continue
-            edge_cost = min(float(data.get("route_cost", data.get("length", 1.0))) for data in keyed.values())
+            edge_cost = min(float(data.get("duplicate_cost", data.get("route_cost", data.get("length", 1.0)))) for data in keyed.values())
             nd = d + edge_cost
             if nd < dist.get(v, math.inf):
                 dist[v] = nd
@@ -83,7 +104,7 @@ def _minimum_pairing_paths(g: nx.MultiGraph, nodes: list) -> list[tuple[object, 
         complete = nx.Graph()
         paths: dict[tuple, list] = {}
         for i, u in enumerate(nodes):
-            lengths, all_paths = nx.single_source_dijkstra(g, u, weight="route_cost")
+            lengths, all_paths = nx.single_source_dijkstra(g, u, weight="duplicate_cost")
             for v in nodes[i + 1:]:
                 if v in lengths:
                     complete.add_edge(u, v, weight=lengths[v])
@@ -165,6 +186,7 @@ def _simplify_degree_two(graph: nx.MultiGraph) -> nx.MultiGraph:
             data = {
                 "length": float(d1.get("length", 0)) + float(d2.get("length", 0)),
                 "route_cost": float(d1.get("route_cost", 0)) + float(d2.get("route_cost", 0)),
+                "duplicate_cost": float(d1.get("duplicate_cost", d1.get("route_cost", 0))) + float(d2.get("duplicate_cost", d2.get("route_cost", 0))),
                 "highway": highway, "name": name, "osm_id": osm_id,
                 "boundary_near": bool(d1.get("boundary_near") or d2.get("boundary_near")),
                 "required": bool(d1.get("required", True)),
@@ -200,10 +222,15 @@ def build_graph(roads: list[dict]) -> nx.MultiGraph:
                 continue
             highway = source.get("highway", "")
             penalty = HIGHWAY_PENALTY.get(highway, 1.5)
+            dup_penalty = DUPLICATE_PENALTY.get(highway, 2.0)
+            # 境界道路は1回は必ず通るが、補完目的の2回目以降はさらに避ける。
+            if bool(source.get("boundary_near", False)):
+                dup_penalty *= 2.0
             graph.add_edge(
                 u, v,
                 length=length,
                 route_cost=length * penalty,
+                duplicate_cost=length * dup_penalty,
                 highway=highway,
                 name=source.get("name", ""),
                 osm_id=source.get("id"),
@@ -1092,7 +1119,7 @@ def _route_parts_from_steps(steps: list[dict]) -> list[LineString]:
 
 
 def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
-    """v1.3.0 現場向け・未巡回ゼロ保証ルート。
+    """v1.3.1 現場向け・未巡回ゼロ保証ルート。
 
     配布対象道路が複数の連結成分に分かれていても、1成分ずつ完全に処理して
     近い次成分へ進む。移動可能な場合は full_graph の実道路だけを使う。
@@ -1230,7 +1257,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
     if not steps:
         raise ValueError("巡回ルートを生成できませんでした")
 
-    # v1.3.0: 未巡回道路ゼロ保証。required_graph の各道路区間について、
+    # v1.3.1: 未巡回道路ゼロ保証。required_graph の各道路区間について、
     # 生成されたstepのGeometryが同じ区間を実際に通過しているか最終照合する。
     # Euler化の内部都合で取りこぼしが発生した場合は「完成」にしない。
     def _edge_sig(u, v, geom):
@@ -1298,7 +1325,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "block-completion-comb-grid-sweep",
         "component_routing": "hierarchical-component-completion",
-        "routing_strategy_version": "1.3.0",
+        "routing_strategy_version": "1.3.1",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
