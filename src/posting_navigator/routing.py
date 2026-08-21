@@ -1224,8 +1224,90 @@ def _route_parts_from_steps(steps: list[dict]) -> list[LineString]:
     return parts
 
 
+
+def _edge_coverage_walk(required: nx.MultiGraph, full: nx.MultiGraph, start, *, component: int = 1):
+    """v1.4.0: parity/Eulerizationを使わない道路被覆walk。
+
+    未巡回辺を直接1回ずつ消化し、現在地から未巡回辺へ到達できなくなった時だけ
+    full road graph上の最短接続を使う。したがって重複は数学的parity補完ではなく、
+    実際に次の未巡回道路へ移るために必要な分だけ発生する。
+    """
+    remaining = required.copy()
+    current = start
+    prev_node = None
+    steps = []
+    axis = _dominant_street_axis(required)
+    required_pairs = {_edge_pair_key(u,v) for u,v,_,_ in required.edges(keys=True,data=True)}
+    traversed_pairs = set()
+
+    def edge_score(u, v, k, d):
+        # 袋小路はその場で処理。その他は直進/格子蛇行と同一街区継続を優先。
+        leaf = remaining.degree(v) == 1
+        reverse = 1 if prev_node is not None and v == prev_node and remaining.degree(current) > 1 else 0
+        # Fleury principle: don't consume a bridge while another edge is available;
+        # doing so strands us and forces an avoidable return over the same road.
+        bridge = 0
+        if remaining.degree(current) > 1 and not leaf:
+            bridge = 1 if _is_bridge_edge(remaining, u, v, k) else 0
+        depart = _edge_departure_bearing(u, v, d)
+        grid = min(_undirected_angle_diff(depart, axis), _undirected_angle_diff(depart, (axis+90)%180))
+        rank = float(d.get('sweep_rank', 0.0))
+        major = 1 if d.get('highway') in {'primary','primary_link','secondary','secondary_link','tertiary','tertiary_link'} else 0
+        return (reverse, bridge, 0 if leaf else 1, rank, grid, major, float(d.get('length',0)))
+
+    while remaining.number_of_edges():
+        rows = list(remaining.edges(current, keys=True, data=True)) if current in remaining else []
+        if rows:
+            _, v, k, d = min(rows, key=lambda r: edge_score(r[0],r[1],r[2],r[3]))
+            st = _step(current, v, d, len(steps)+1, component=component)
+            steps.append(st)
+            traversed_pairs.add(_edge_pair_key(current,v))
+            remaining.remove_edge(current, v, k)
+            prev_node, current = current, v
+            continue
+
+        # 今いる場所から、未巡回辺の端点のうち道路距離が最短の入口へ移動。
+        targets = {n for n, deg in remaining.degree() if deg > 0}
+        try:
+            move_graph = full.copy()
+            for aa, bb, kk, dd in move_graph.edges(keys=True, data=True):
+                base = float(dd.get('route_cost', dd.get('length', 1.0)))
+                pair = _edge_pair_key(aa, bb)
+                reuse = pair in traversed_pairs
+                major = dd.get('highway') in {'primary','primary_link','secondary','secondary_link','tertiary','tertiary_link'}
+                # A previously used road is a last resort, especially an arterial.
+                dd['coverage_move_cost'] = base + (5000.0 if reuse else 0.0) + (12000.0 if reuse and major else 0.0)
+            lengths, paths = nx.single_source_dijkstra(move_graph, current, weight='coverage_move_cost')
+            reachable = [(lengths[n], n) for n in targets if n in lengths]
+        except Exception:
+            reachable = []
+        if not reachable:
+            raise nx.NetworkXNoPath('未巡回道路へ実道路上で接続できません')
+        _, target = min(reachable, key=lambda x: x[0])
+        path = paths[target]
+        for a,b in zip(path,path[1:]):
+            keyed=full.get_edge_data(a,b)
+            d=dict(min(keyed.values(), key=lambda x:x.get('route_cost', math.inf)))
+            pair=_edge_pair_key(a,b)
+            # requiredを既に通った道路だけが真の重複。未巡回requiredなら移動中に消化する。
+            if pair in required_pairs and pair not in traversed_pairs:
+                match=None
+                if a in remaining and remaining.has_edge(a,b):
+                    kk=next(iter(remaining[a][b]))
+                    match=kk
+                if match is not None:
+                    st=_step(a,b,d,len(steps)+1,component=component)
+                    steps.append(st); traversed_pairs.add(pair); remaining.remove_edge(a,b,match)
+                    continue
+            d['duplicated'] = pair in traversed_pairs
+            st=_step(a,b,d,len(steps)+1,transfer=True,component=component)
+            steps.append(st)
+        prev_node = path[-2] if len(path)>1 else prev_node
+        current = target
+    return steps, current
+
 def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
-    """v1.3.4 現場向け・重複最小化＋未巡回ゼロ保証ルート。
+    """v1.4.0 非Euler型・必要最小限重複＋未巡回ゼロ保証ルート。
 
     配布対象道路が複数の連結成分に分かれていても、1成分ずつ完全に処理して
     近い次成分へ進む。移動可能な場合は full_graph の実道路だけを使う。
@@ -1294,59 +1376,21 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
 
         comp_graph = required_graph.subgraph(nodes).copy()
         _assign_local_sweep_blocks(comp_graph, comp_start, cell_m=220.0)
-        radial = _node_radial_distances(comp_graph, comp_start)
-        # 配布対象上の次数ではなく、実際の歩行可能道路網での次数を使う。
-        # 配布フィルタのせいで「見かけ上の袋小路」になった地点での即時往復を防ぐ。
-        base_degrees = {n: full_graph.degree(n) if n in full_graph else comp_graph.degree(n) for n in comp_graph.nodes}
-        raw_end_candidates = [n for n in comp_graph.nodes if comp_graph.degree(n) != 2 and n != comp_start] or [n for n in comp_graph.nodes if n != comp_start]
-        end_candidates = sorted(raw_end_candidates, key=lambda n: radial.get(n, 0.0), reverse=True)[:min(24, len(raw_end_candidates))]
-        if not end_candidates:
-            end_candidates = [comp_start]
-
-        route_options = []
-        for candidate_end in end_candidates:
-            try:
-                routed = _eulerize_open(comp_graph, comp_start, candidate_end, connector_graph=full_graph)
-            except Exception:
-                continue
-            candidate_trails = []
-            try:
-                candidate_trails.append(
-                    _local_completion_euler_trail(
-                        routed, comp_start, candidate_end,
-                        radial=radial, base_degrees=base_degrees,
-                    )
-                )
-            except nx.NetworkXError:
-                pass
-            # Render free tier対策: 探索数を大幅に制限する。
-            try:
-                candidate_trails.append(
-                    _turn_aware_euler_trail(
-                        routed, comp_start, candidate_end,
-                        samples=24, radial=radial,
-                    )
-                )
-            except nx.NetworkXError:
-                pass
-            for t in candidate_trails:
-                t = _prune_redundant_duplicate_backtracks(t)
-                quality = _local_completion_quality(t, radial=radial, base_degrees=base_degrees)
-                # outwardは完全な同点時だけ。遠くで終えるために重複距離を増やさない。
-                outward_bonus = -radial.get(candidate_end, 0.0) / 5000.0
-                route_options.append((quality + (outward_bonus,), candidate_end, t))
-        if not route_options:
-            raise ValueError("巡回順を生成できませんでした")
-        _, comp_end, trail = min(route_options, key=lambda x: x[0])
+        try:
+            local_steps, comp_end = _edge_coverage_walk(comp_graph, full_graph, comp_start, component=optimized_components + 1)
+        except nx.NetworkXNoPath as exc:
+            raise ValueError(str(exc)) from exc
 
         first_component_step_index = len(steps)
-        for u, v, k, data in trail:
-            st = _step(u, v, data, len(steps) + 1, component=optimized_components + 1)
+        for st in local_steps:
+            st["seq"] = len(steps) + 1
             steps.append(st)
-            if st["duplicated"]:
+            if st.get("duplicated"):
                 duplicated_length += st["length_m"]
-                if st["highway"] in {"primary", "primary_link", "secondary", "secondary_link", "tertiary", "tertiary_link"}:
+                if st.get("highway") in {"primary", "primary_link", "secondary", "secondary_link", "tertiary", "tertiary_link"}:
                     major_duplicated += st["length_m"]
+            if st.get("transfer"):
+                transfer_length += st["length_m"]
         if break_before and len(steps) > first_component_step_index:
             steps[first_component_step_index]["component_break_before"] = True
 
@@ -1430,9 +1474,9 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "skipped_disconnected_length_m": 0.0,
         "dead_end_count": len(dead_ends),
         "midroad_uturn_count": midroad_uturns,
-        "routing_strategy": "block-completion-comb-grid-sweep",
-        "component_routing": "hierarchical-component-completion",
-        "routing_strategy_version": "1.3.4",
+        "routing_strategy": "direct-edge-coverage-walk",
+        "component_routing": "non-euler-required-edge-first",
+        "routing_strategy_version": "1.4.0",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
