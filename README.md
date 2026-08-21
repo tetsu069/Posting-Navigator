@@ -1,4 +1,4 @@
-# Posting Navigator v1.3.3 — 道路網羅性（completeness）強化版
+# Posting Navigator v1.3.4 — 道路網羅性（completeness）強化版
 
 v1.2.3をベースに、町丁目境界に沿う実道路が巡回対象から抜ける問題を修正しました。
 

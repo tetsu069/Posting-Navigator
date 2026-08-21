@@ -10,7 +10,7 @@ def add(g,a,b,cost=1.0):
 
 def test_pairing_paths_avoid_reusing_same_corridor_when_small_detour_exists():
     # Two matched pairs can both use the central corridor, but the second has a
-    # modest alternate route.  v1.3.3 should spread parity duplication instead
+    # modest alternate route.  v1.3.4 should spread parity duplication instead
     # of piling both pairs onto the same physical road.
     g=nx.MultiGraph()
     A=(0,0); B=(1,0); C=(2,0); D=(3,0)
