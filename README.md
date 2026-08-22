@@ -1,6 +1,6 @@
-# Posting Navigator v1.4.0 — 非Euler型ルーティング
+# Posting Navigator v1.4.1 — 非Euler型ルーティング
 
-v1.4.0 は巡回エンジンを根本変更しました。
+v1.4.1 は巡回エンジンを根本変更しました。
 
 - Chinese Postman / Euler化を通常の巡回生成から外しました。
 - 未巡回の配布対象道路を直接1回ずつ消化します。
