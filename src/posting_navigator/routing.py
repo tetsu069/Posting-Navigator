@@ -1226,7 +1226,7 @@ def _route_parts_from_steps(steps: list[dict]) -> list[LineString]:
 
 
 def _edge_coverage_walk(required: nx.MultiGraph, full: nx.MultiGraph, start, *, component: int = 1):
-    """v1.4.1 block-first direct coverage walk.
+    """v1.4.2 block-first direct coverage walk.
 
     Finish one nearby sweep block before intentionally moving to another block.
     Reuse of an already-traversed arterial is prohibited when an alternative
@@ -1387,7 +1387,7 @@ def _edge_coverage_walk(required: nx.MultiGraph, full: nx.MultiGraph, start, *, 
     return steps, current
 
 def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
-    """v1.4.1 街区完結型・非Euler型・必要最小限重複＋未巡回ゼロ保証ルート。
+    """v1.4.2 街区完結型・非Euler型・必要最小限重複＋未巡回ゼロ保証ルート。
 
     配布対象道路が複数の連結成分に分かれていても、1成分ずつ完全に処理して
     近い次成分へ進む。移動可能な場合は full_graph の実道路だけを使う。

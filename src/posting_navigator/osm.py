@@ -25,6 +25,61 @@ EXCLUDED_HIGHWAYS = {"motorway", "motorway_link", "trunk", "trunk_link", "racewa
 _ENDPOINT_COOLDOWN_UNTIL: dict[str, float] = {}
 
 
+
+def _suppress_divided_major_centerlines(roads: list[dict]) -> None:
+    """v1.4.2: divided arterialの中央車道を配布対象から外す。
+
+    両側にほぼ平行な徒歩/生活道路が存在する区間では、中央の major road を
+    required=False にする。道路自体は connector として残すため、必要時の移動には使える。
+    片側しか道路がない場合や境界救済区間は落とさない。
+    """
+    major = {"primary", "primary_link", "secondary", "secondary_link", "tertiary", "tertiary_link"}
+    flank_types = {"residential", "living_street", "unclassified", "service", "road",
+                   "pedestrian", "footway", "path", "steps",
+                   "primary", "primary_link", "secondary", "secondary_link", "tertiary", "tertiary_link"}
+
+    def signed_side(base: LineString, other: LineString) -> int:
+        # base中央付近の接線に対して other の代表点が左右どちらか。
+        if base.length < 2.0:
+            return 0
+        mid = base.interpolate(0.5, normalized=True)
+        a = base.interpolate(max(0.0, base.project(mid) - min(8.0, base.length * 0.2)))
+        b = base.interpolate(min(base.length, base.project(mid) + min(8.0, base.length * 0.2)))
+        q = other.interpolate(other.project(mid))
+        cross = (b.x-a.x)*(q.y-mid.y) - (b.y-a.y)*(q.x-mid.x)
+        return 1 if cross > 0.5 else (-1 if cross < -0.5 else 0)
+
+    for road in roads:
+        if road.get("highway") not in major or road.get("boundary_near"):
+            continue
+        base = road.get("_geom_m")
+        if base is None or base.length < 25.0:
+            continue
+        sides = {1: False, -1: False}
+        # 並走路が中央車道の相当部分に沿っていることを要求。単なる交差道路は除外。
+        corridor = base.buffer(42.0, cap_style=2)
+        near_core = base.buffer(5.0, cap_style=2)
+        for other in roads:
+            if other is road or not other.get("required") or other.get("highway") not in flank_types:
+                continue
+            geom = other.get("_geom_m")
+            if geom is None or geom.length < 18.0:
+                continue
+            if geom.distance(base) < 6.0 or geom.distance(base) > 42.0:
+                continue
+            inside = geom.intersection(corridor).difference(near_core)
+            overlap = getattr(inside, "length", 0.0)
+            if overlap < min(24.0, base.length * 0.35):
+                continue
+            side = signed_side(base, geom)
+            if side:
+                sides[side] = True
+            if sides[1] and sides[-1]:
+                road["required"] = False
+                road["center_carriageway_optional"] = True
+                break
+
+
 def overpass_query(poly: Polygon) -> str:
     minx, miny, maxx, maxy = poly.bounds
     bbox = f"{miny:.7f},{minx:.7f},{maxy:.7f},{maxx:.7f}"
@@ -479,6 +534,9 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
                 "access": access, "service": service,
                 "foot": tags.get("foot", ""), "boundary_near": boundary_near,
                 "boundary_clip_tail": boundary_clip_tail, "required": required,
-                "geometry": geom,
+                "geometry": geom, "_geom_m": geom_m,
             })
+    _suppress_divided_major_centerlines(roads)
+    for road in roads:
+        road.pop("_geom_m", None)
     return roads
