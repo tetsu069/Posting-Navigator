@@ -1226,7 +1226,7 @@ def _route_parts_from_steps(steps: list[dict]) -> list[LineString]:
 
 
 def _edge_coverage_walk(required: nx.MultiGraph, full: nx.MultiGraph, start, *, component: int = 1):
-    """v1.4.2 block-first direct coverage walk.
+    """v1.4.3 hard block-completion coverage walk.
 
     Finish one nearby sweep block before intentionally moving to another block.
     Reuse of an already-traversed arterial is prohibited when an alternative
@@ -1361,6 +1361,12 @@ def _edge_coverage_walk(required: nx.MultiGraph, full: nx.MultiGraph, start, *, 
         if path is None:
             path = shortest_to(targets, hard_avoid_major_reuse=False)
         if path is None:
+            # v1.4.3 HARD BLOCK LOCK: a block may not be abandoned while it still
+            # has required edges.  The relaxed pass already permits necessary
+            # reuse, so failure here means the block is genuinely unreachable
+            # in the real-road graph, not merely inconvenient.
+            if current_block is not None and block_remaining.get(current_block, 0) > 0:
+                raise nx.NetworkXNoPath("現在の街区に未巡回道路が残っています（街区完結ロック）")
             current_block = choose_block(current)
             targets = block_nodes(current_block)
             path = shortest_to(targets, hard_avoid_major_reuse=True) or shortest_to(targets, hard_avoid_major_reuse=False)
@@ -1387,7 +1393,7 @@ def _edge_coverage_walk(required: nx.MultiGraph, full: nx.MultiGraph, start, *, 
     return steps, current
 
 def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
-    """v1.4.2 街区完結型・非Euler型・必要最小限重複＋未巡回ゼロ保証ルート。
+    """v1.4.3 街区完全完結型・非Euler型・必要最小限重複＋未巡回ゼロ保証ルート。
 
     配布対象道路が複数の連結成分に分かれていても、1成分ずつ完全に処理して
     近い次成分へ進む。移動可能な場合は full_graph の実道路だけを使う。
@@ -1455,7 +1461,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
                 manual_transfer_distance += dist
 
         comp_graph = required_graph.subgraph(nodes).copy()
-        _assign_local_sweep_blocks(comp_graph, comp_start, cell_m=160.0)
+        _assign_local_sweep_blocks(comp_graph, comp_start, cell_m=105.0)
         try:
             local_steps, comp_end = _edge_coverage_walk(comp_graph, full_graph, comp_start, component=optimized_components + 1)
         except nx.NetworkXNoPath as exc:
