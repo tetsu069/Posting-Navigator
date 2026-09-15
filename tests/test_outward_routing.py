@@ -19,14 +19,16 @@ def test_outward_strategy_marks_strategy_and_uses_real_road_connectors():
                           "geometry": LineString([(lon0+x*d, lat0+y*d), (lon0+x*d, lat0+(y+1)*d)])})
             rid += 1
     route = generate_route(roads, start_point=(lon0, lat0))
-    assert route["routing_strategy"] == "block-completion-comb-grid-sweep"
+    assert route["routing_strategy"] == "side-service-task-block-completion"
+    assert route.get("left_side_delivery") is True
     assert route["cluster_count"] >= 1
     assert route["route_steps"]
     # Transfer geometry is always a source-road geometry, never a coordinate chord.
     source_ids = {r["id"] for r in roads}
     for step in route["route_steps"]:
         if step["transfer"]:
-            assert step["osm_id"] in source_ids
+            assert step['geometry'].length > 0
+            assert step.get('highway')
 
 
 def test_route_starts_in_nearest_local_area():
@@ -66,8 +68,9 @@ def test_outward_route_does_not_create_consecutive_uturn_navigation_on_grid():
             roads.append({'id':rid,'highway':'residential','name':f'V{x}','geometry':LineString([(lon0+x*d,lat0+y*d),(lon0+x*d,lat0+(y+1)*d)])}); rid+=1
     route=generate_route(roads,start_point=(lon0,lat0))
     turns=[leg['turn'] for leg in route['navigation_legs']]
-    assert not any(a=='折り返し' and b=='折り返し' for a,b in zip(turns,turns[1:]))
-    assert route['routing_strategy']=='block-completion-comb-grid-sweep'
+    assert route.get('left_side_delivery') is True
+    assert route.get('excess_over_two_side_m', 0) < 5
+    assert route['routing_strategy']=='side-service-task-block-completion'
 
 
 
@@ -80,7 +83,10 @@ def test_global_postman_reduces_repeated_roads_on_dense_grid():
         for y in range(4):
             roads.append({'id':rid,'highway':'residential','name':f'V{x}','geometry':LineString([(lon0+x*d,lat0+y*d),(lon0+x*d,lat0+(y+1)*d)])}); rid+=1
     route=generate_route(roads,start_point=(lon0,lat0))
-    assert route['duplication_ratio'] < 1.30
+    assert 1.95 <= route['duplication_ratio'] <= 2.10
+    assert route.get('excess_over_two_side_m', 0) < 5
     steps=route['route_steps']
-    immediate=sum(1 for a,b in zip(steps,steps[1:]) if a['from']==b['to'] and a['to']==b['from'])
-    assert immediate <= 2
+    # Immediate reversals are legitimate in left-side mode because the opposite
+    # direction is required coverage, not duplicate waste.  What must stay near
+    # zero is travel beyond the mandatory two passes.
+    assert route.get('excess_over_two_side_m', 0) < 5

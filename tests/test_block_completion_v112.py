@@ -34,7 +34,9 @@ def test_grid_does_not_create_excessive_long_revisits():
         for a,b in zip(ys,ys[1:]): roads.append(r((x,a),(x,b)))
     route=generate_route(roads,start_point=(xs[0],ys[-1]))
     steps=route['route_steps']
-    assert route['duplication_ratio'] < 1.55
+    assert 1.95 <= route['duplication_ratio'] <= 2.10
+    assert route.get('left_side_delivery') is True
+    assert route.get('excess_over_two_side_m', 0) < 5
     # ルートは全対象道路をカバーする。
     assert route['route_edges'] >= route['source_edges']
-    assert route['routing_strategy']=='block-completion-comb-grid-sweep'
+    assert route['routing_strategy']=='side-service-task-block-completion'

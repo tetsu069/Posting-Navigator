@@ -19,4 +19,5 @@ def test_cycle_needs_no_duplicate_edges():
     for x,y in [(a,b),(b,c),(c,d),(d,a)]: add(g,x,y)
     steps,end=_edge_coverage_walk(g,g,a)
     assert sum(1 for s in steps if s.get('duplicated'))==0
-    assert sum(1 for s in steps if not s.get('transfer'))==4
+    assert sum(1 for s in steps if not s.get('transfer'))==8
+    assert all(s.get('left_side_pass') for s in steps if not s.get('transfer'))

@@ -1225,175 +1225,233 @@ def _route_parts_from_steps(steps: list[dict]) -> list[LineString]:
 
 
 
-def _edge_coverage_walk(required: nx.MultiGraph, full: nx.MultiGraph, start, *, component: int = 1):
-    """v1.4.3 hard block-completion coverage walk.
+def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: int, seq_start: int = 1):
+    """v1.6.0: road sides are independent service tasks.
 
-    Finish one nearby sweep block before intentionally moving to another block.
-    Reuse of an already-traversed arterial is prohibited when an alternative
-    real-road path exists. Non-dead-end immediate reversals are also avoided.
+    A physical road has two directed side-service tasks.  We still use an exact
+    balanced directed circuit so every side is served once with no unnecessary
+    third pass, but the chosen circuit is selected from many alternatives with a
+    strong preference to postpone the opposite-side task at normal junctions.
+    True dead ends may reverse immediately.
     """
-    remaining = required.copy()
-    current = start
-    prev_node = None
-    steps = []
-    axis = _dominant_street_axis(required)
-    traversed_pairs = set()
-    original_degree = dict(required.degree())
-    major_set = {"primary","primary_link","secondary","secondary_link","tertiary","tertiary_link"}
+    import random
+    base=[]; token=0
+    for u,v,k,data in block_graph.edges(keys=True,data=True):
+        for a,b,side in ((u,v,"left-a"),(v,u,"left-b")):
+            d=dict(data); d.update(left_side_pass=True,side_service_task=True,coverage_direction=side,duplicated=False)
+            base.append((a,b,("side",token,0 if a==u else 1),d))
+        token+=1
+    if not base: return [],entry
+    undeg=dict(block_graph.degree())
+    local_entry=entry if entry in block_graph else min(block_graph.nodes,key=lambda n:_dist_m(entry,n))
+    def make(order):
+        g=nx.MultiDiGraph()
+        for u,v,k,d in order:g.add_edge(u,v,key=k,**dict(d))
+        return g
+    def score(circ,g):
+        immediate=0; turns=0.0; prev=None
+        for i,(u,v,k) in enumerate(circ):
+            d=g.get_edge_data(u,v,k); rev=False
+            if i:
+                pu,pv,pk=circ[i-1]; rev=(pu==v and pv==u)
+                if rev and undeg.get(u,0)>1: immediate+=1
+            try:
+                br=_edge_departure_bearing(u,v,d)
+                if prev is not None and not (rev and undeg.get(u,0)==1): turns+=abs(((br-prev+540)%360)-180)
+                prev=br
+            except Exception:pass
+        return (immediate,turns)
+    orders=[list(base),list(reversed(base))]
+    rng=random.Random(1600+len(base)*17)
+    for _ in range(min(192,max(48,len(base)*4))):
+        z=list(base);rng.shuffle(z);orders.append(z)
+    best=None
+    for order in orders:
+        g=make(order)
+        try:circ=list(nx.eulerian_circuit(g,source=local_entry,keys=True))
+        except Exception:continue
+        sc=score(circ,g)
+        if best is None or sc<best[0]:best=(sc,circ,g)
+    if best is None:raise nx.NetworkXError("左右配布タスクを小区画内で完了できません")
+    _,circ,g=best
+    steps=[];seq=seq_start;current=local_entry
+    for u,v,k in circ:
+        d=dict(g.get_edge_data(u,v,k));st=_step(u,v,d,seq,transfer=False,component=component)
+        st["left_side_pass"]=True;st["side_service_task"]=True;st["coverage_direction"]=d.get("coverage_direction")
+        steps.append(st);seq+=1;current=v
+    return steps,current
 
-    block_remaining = {}
+def _block_components(required: nx.MultiGraph, bid) -> list[nx.MultiGraph]:
+    """Connected pieces belonging to one sweep block."""
+    h = nx.MultiGraph()
+    for u, v, k, d in required.edges(keys=True, data=True):
+        if d.get("sweep_block") == bid:
+            h.add_edge(u, v, key=k, **dict(d))
+    if h.number_of_edges() == 0:
+        return []
+    out = []
+    for nodes in nx.connected_components(h):
+        sub = h.subgraph(nodes).copy()
+        if sub.number_of_edges():
+            out.append(sub)
+    return out
+
+
+def _shortest_transfer_path_left_mode(full: nx.MultiGraph, source, targets: set, used_pairs: set):
+    """Shortest real-road transfer, discouraging third+ use of the same street."""
+    if source in targets:
+        return [source]
+    major = {"primary","primary_link","secondary","secondary_link","tertiary","tertiary_link"}
+    def weight(a, b, data):
+        vals = data.values() if data and all(isinstance(x, dict) for x in data.values()) else [data]
+        best = math.inf
+        for d in vals:
+            length = float(d.get("length", 1.0))
+            reused = _edge_pair_key(a, b) in used_pairs
+            cost = length
+            # The two required coverage directions are handled inside blocks.
+            # Transfers should not create a 3rd/4th pass unless necessary.
+            if reused:
+                cost += 5000.0 + length * 30.0
+                if d.get("highway") in major:
+                    cost += 100000.0 + length * 200.0
+            best = min(best, cost)
+        return best
+    try:
+        lengths, paths = nx.single_source_dijkstra(full, source, weight=weight)
+    except Exception:
+        return None
+    cand = [(lengths[n], n) for n in targets if n in lengths]
+    if not cand:
+        return None
+    _, target = min(cand, key=lambda x: x[0])
+    return paths[target]
+
+
+def _edge_coverage_walk(required: nx.MultiGraph, full: nx.MultiGraph, start, *, component: int = 1):
+    """v1.6.0 SIDE-SERVICE TASKS + hard small-block completion.
+
+    Rules:
+      * Deliver to houses on the walker's LEFT.
+      * Each road side is a separate service task; opposite-side service is deferred rather than immediately reversed.
+      * Finish the current small sweep block completely before moving to another.
+      * Inside a connected block-piece, every side-task is served exactly once; normal-junction immediate reversals are avoided.
+      * Inter-block movement uses only real OSM roads and strongly avoids creating
+        a 3rd/4th traversal of already covered roads.
+    """
+    current = start
+    steps: list[dict] = []
+    used_pairs: set = set()
+
+    # Build deterministic block order metadata, but choose the next block by
+    # real-road proximity from the current position.
+    # Direct callers/tests may supply a graph before sweep-block assignment.
+    # Treat it as one small block rather than failing on bid=None.
+    if all(d.get("sweep_block") is None for _, _, _, d in required.edges(keys=True, data=True)):
+        for _, _, _, d in required.edges(keys=True, data=True):
+            d["sweep_block"] = (0, 0)
+            d["sweep_rank"] = 0
+
     block_rank = {}
-    for _, _, _, d in remaining.edges(keys=True, data=True):
+    block_ids = set()
+    for _, _, _, d in required.edges(keys=True, data=True):
         bid = d.get("sweep_block")
-        block_remaining[bid] = block_remaining.get(bid, 0) + 1
+        block_ids.add(bid)
         block_rank[bid] = min(block_rank.get(bid, math.inf), float(d.get("sweep_rank", 0.0)))
 
+    unfinished = set(block_ids)
+
     def block_nodes(bid):
-        out = set()
-        for u, v, _, d in remaining.edges(keys=True, data=True):
+        nodes = set()
+        for u, v, _, d in required.edges(keys=True, data=True):
             if d.get("sweep_block") == bid:
-                out.update((u, v))
-        return out
+                nodes.update((u, v))
+        return nodes
 
-    def choose_block(node):
-        bids = [b for b, c in block_remaining.items() if c > 0]
-        if not bids:
-            return None
-        return min(bids, key=lambda b: (
-            min((_dist_m(node, n) for n in block_nodes(b)), default=math.inf),
-            block_rank.get(b, math.inf),
-        ))
+    def choose_next_block():
+        candidates = []
+        for bid in unfinished:
+            nodes = block_nodes(bid)
+            path = _shortest_transfer_path_left_mode(full, current, nodes, used_pairs)
+            if path is None:
+                continue
+            plen = 0.0
+            for a, b in zip(path, path[1:]):
+                keyed = full.get_edge_data(a, b) or {}
+                if keyed:
+                    plen += min(float(x.get("length", 0.0)) for x in keyed.values())
+            candidates.append((plen, block_rank.get(bid, math.inf), repr(bid), bid, path))
+        if not candidates:
+            return None, None
+        _, _, _, bid, path = min(candidates)
+        return bid, path
 
-    current_block = choose_block(current)
+    while unfinished:
+        bid, path_to_block = choose_next_block()
+        if bid is None:
+            raise nx.NetworkXNoPath("次の小区画へ実道路上で接続できません")
 
-    def rows_here(node, bid):
-        if node not in remaining:
-            return []
-        return [r for r in remaining.edges(node, keys=True, data=True) if r[3].get("sweep_block") == bid]
+        # Move to this block only once; after entering it, every connected piece
+        # assigned to the block is completed before another block can be selected.
+        if path_to_block and len(path_to_block) > 1:
+            for a, b in zip(path_to_block, path_to_block[1:]):
+                keyed = full.get_edge_data(a, b) or {}
+                if not keyed:
+                    raise nx.NetworkXNoPath("小区画への移動道路が見つかりません")
+                d = dict(min(keyed.values(), key=lambda x: float(x.get("length", math.inf))))
+                d["duplicated"] = _edge_pair_key(a, b) in used_pairs
+                st = _step(a, b, d, len(steps)+1, transfer=True, component=component)
+                st["left_side_pass"] = False
+                steps.append(st)
+                used_pairs.add(_edge_pair_key(a, b))
+                current = b
 
-    def edge_score(u, v, k, d):
-        leaf = original_degree.get(v, 0) == 1
-        reverse = prev_node is not None and v == prev_node and original_degree.get(current, 0) > 1
-        bridge = False
-        if remaining.degree(current) > 1 and not leaf:
-            bridge = _is_bridge_edge(remaining, u, v, k)
-        depart = _edge_departure_bearing(u, v, d)
-        grid = min(_undirected_angle_diff(depart, axis), _undirected_angle_diff(depart, (axis + 90) % 180))
-        major = d.get("highway") in major_set
-        # Prefer smooth continuation; true leaves remain serviceable, but are not
-        # artificially pulled forward ahead of a natural through movement.
-        return (1 if reverse else 0, 1 if bridge else 0, 1 if leaf else 0, grid, 1 if major else 0, float(d.get("length", 0.0)))
+        pieces = _block_components(required, bid)
+        remaining_pieces = pieces[:]
+        while remaining_pieces:
+            # Choose the nearest connected piece within the SAME block.
+            best = None
+            for i, piece in enumerate(remaining_pieces):
+                nodes = set(piece.nodes)
+                path = _shortest_transfer_path_left_mode(full, current, nodes, used_pairs)
+                if path is None:
+                    continue
+                plen = 0.0
+                for a, b in zip(path, path[1:]):
+                    keyed = full.get_edge_data(a, b) or {}
+                    if keyed:
+                        plen += min(float(x.get("length", 0.0)) for x in keyed.values())
+                row = (plen, i, path, piece)
+                if best is None or row[0] < best[0]:
+                    best = row
+            if best is None:
+                raise nx.NetworkXNoPath("現在の小区画内に未処理道路が残っています")
+            _, idx, path, piece = best
+            remaining_pieces.pop(idx)
 
-    def consume(a, b, k, d, transfer=False):
-        nonlocal current, prev_node
-        st = _step(a, b, d, len(steps) + 1, transfer=transfer, component=component)
-        steps.append(st)
-        traversed_pairs.add(_edge_pair_key(a, b))
-        if k is not None and a in remaining and remaining.has_edge(a, b, k):
-            bid = d.get("sweep_block")
-            remaining.remove_edge(a, b, k)
-            block_remaining[bid] = max(0, block_remaining.get(bid, 1) - 1)
-        prev_node, current = a, b
+            if path and len(path) > 1:
+                for a, b in zip(path, path[1:]):
+                    keyed = full.get_edge_data(a, b) or {}
+                    d = dict(min(keyed.values(), key=lambda x: float(x.get("length", math.inf))))
+                    d["duplicated"] = _edge_pair_key(a, b) in used_pairs
+                    st = _step(a, b, d, len(steps)+1, transfer=True, component=component)
+                    st["left_side_pass"] = False
+                    steps.append(st)
+                    used_pairs.add(_edge_pair_key(a, b))
+                    current = b
 
-    def shortest_to(targets, hard_avoid_major_reuse=True):
-        if not targets:
-            return None
-        g = full.copy()
-        if hard_avoid_major_reuse:
-            # First-pass hard constraints:
-            #  - never reuse an already-traversed arterial;
-            #  - never immediately return over the edge just used at a genuine junction.
-            for a, b, k, d in list(g.edges(keys=True, data=True)):
-                pair = _edge_pair_key(a, b)
-                reused_major = pair in traversed_pairs and d.get("highway") in major_set
-                immediate_back = (
-                    prev_node is not None
-                    and original_degree.get(current, 0) > 1
-                    and pair == _edge_pair_key(prev_node, current)
-                )
-                if reused_major or immediate_back:
-                    g.remove_edge(a, b, k)
-            if current not in g:
-                return None
-        def weight(a, b, data):
-            vals = data.values() if data and all(isinstance(x, dict) for x in data.values()) else [data]
-            best = math.inf
-            for d in vals:
-                length = float(d.get("length", 1.0))
-                reuse = _edge_pair_key(a, b) in traversed_pairs
-                major = d.get("highway") in major_set
-                cost = length
-                if reuse:
-                    cost += 2000.0 + length * 12.0
-                if reuse and major:
-                    cost += 1_000_000.0 + length * 1000.0
-                best = min(best, cost)
-            return best
-        try:
-            lengths, paths = nx.single_source_dijkstra(g, current, weight=weight)
-        except Exception:
-            return None
-        cand = [(lengths[n], n) for n in targets if n in lengths]
-        if not cand:
-            return None
-        _, target = min(cand, key=lambda x: x[0])
-        return paths[target]
+            entry = current if current in piece else min(piece.nodes, key=lambda n: _dist_m(current, n))
+            local_steps, current = _side_task_block_circuit(piece, entry, component=component, seq_start=len(steps)+1)
+            for st in local_steps:
+                steps.append(st)
+                used_pairs.add(_edge_pair_key(st["from"], st["to"]))
 
-    while remaining.number_of_edges():
-        if current_block is None or block_remaining.get(current_block, 0) <= 0:
-            current_block = choose_block(current)
-
-        rows = rows_here(current, current_block)
-        if rows:
-            # Hard rule: do not immediately go back over the same edge unless there
-            # is no other unfinished edge in this block at the current junction.
-            non_reverse = [r for r in rows if not (prev_node is not None and r[1] == prev_node and original_degree.get(current, 0) > 1)]
-            if non_reverse:
-                rows = non_reverse
-            _, v, k, d = min(rows, key=lambda r: edge_score(r[0], r[1], r[2], r[3]))
-            consume(current, v, k, d, transfer=False)
-            continue
-
-        # Stay in the same block.  Only when it is finished/unreachable may we move
-        # to another block.
-        targets = block_nodes(current_block)
-        path = shortest_to(targets, hard_avoid_major_reuse=True)
-        if path is None:
-            path = shortest_to(targets, hard_avoid_major_reuse=False)
-        if path is None:
-            # v1.4.3 HARD BLOCK LOCK: a block may not be abandoned while it still
-            # has required edges.  The relaxed pass already permits necessary
-            # reuse, so failure here means the block is genuinely unreachable
-            # in the real-road graph, not merely inconvenient.
-            if current_block is not None and block_remaining.get(current_block, 0) > 0:
-                raise nx.NetworkXNoPath("現在の街区に未巡回道路が残っています（街区完結ロック）")
-            current_block = choose_block(current)
-            targets = block_nodes(current_block)
-            path = shortest_to(targets, hard_avoid_major_reuse=True) or shortest_to(targets, hard_avoid_major_reuse=False)
-        if path is None:
-            raise nx.NetworkXNoPath("未巡回道路へ実道路上で接続できません")
-
-        for a, b in zip(path, path[1:]):
-            # If movement reaches an unvisited edge of the current block, count it
-            # as coverage instead of adding a separate transfer traversal.
-            match = None
-            if a in remaining and remaining.has_edge(a, b):
-                for kk, dd in remaining[a][b].items():
-                    if dd.get("sweep_block") == current_block:
-                        match = (kk, dd)
-                        break
-            if match is not None:
-                consume(a, b, match[0], match[1], transfer=False)
-            else:
-                keyed = full.get_edge_data(a, b)
-                d = dict(min(keyed.values(), key=lambda x: x.get("route_cost", math.inf)))
-                d["duplicated"] = _edge_pair_key(a, b) in traversed_pairs
-                consume(a, b, None, d, transfer=True)
+        unfinished.remove(bid)
 
     return steps, current
 
 def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
-    """v1.4.3 街区完全完結型・非Euler型・必要最小限重複＋未巡回ゼロ保証ルート。
+    """v1.6.0 左右配布タスク・小区画完結型カバレッジルート。
 
     配布対象道路が複数の連結成分に分かれていても、1成分ずつ完全に処理して
     近い次成分へ進む。移動可能な場合は full_graph の実道路だけを使う。
@@ -1521,6 +1579,26 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
             f"配布対象道路に未巡回区間が残っています（{len(missing_sigs)}区間、約{missing_len:.0f}m）。完成扱いにしません。"
         )
 
+    # v1.6.0 SIDE-SERVICE GUARANTEE: every required physical segment must appear in
+    # both directions among coverage (non-transfer) steps.  One-sided completion is
+    # not accepted because it would leave the houses on one side unserved.
+    directed_required = set()
+    for u, v, _, data in required_graph.edges(keys=True, data=True):
+        sig = _edge_sig(u, v, data.get("geometry", LineString([u, v])))
+        directed_required.add((sig, tuple(u), tuple(v)))
+        directed_required.add((sig, tuple(v), tuple(u)))
+    directed_seen = set()
+    for st in steps:
+        if st.get("transfer"):
+            continue
+        sig = _edge_sig(st["from"], st["to"], st["geometry"])
+        directed_seen.add((sig, tuple(st["from"]), tuple(st["to"])))
+    directional_missing = directed_required - directed_seen
+    if directional_missing:
+        raise ValueError(
+            f"左側配布モードで片方向しか通っていない道路があります（{len(directional_missing)}方向）。完成扱いにしません。"
+        )
+
     parts = _route_parts_from_steps(steps)
     if not parts:
         raise ValueError("巡回ルート形状を生成できませんでした")
@@ -1554,15 +1632,18 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "duplicated_length_m": round(duplicated_length, 1),
         "major_road_duplicated_m": round(major_duplicated, 1),
         "duplication_ratio": round((route_length - transfer_length) / max(source_length, 1.0), 3),
+        "left_side_delivery": True,
+        "expected_two_side_ratio": 2.0,
+        "excess_over_two_side_m": round(max(0.0, (route_length - transfer_length) - 2.0 * source_length), 1),
         "connected_nodes": required_graph.number_of_nodes(),
         "component_count": total_required_components,
         "cluster_count": optimized_components,
         "skipped_disconnected_length_m": 0.0,
         "dead_end_count": len(dead_ends),
         "midroad_uturn_count": midroad_uturns,
-        "routing_strategy": "block-completion-comb-grid-sweep",
-        "component_routing": "non-euler-required-edge-first",
-        "routing_strategy_version": "1.4.1",
+        "routing_strategy": "side-service-task-block-completion",
+        "component_routing": "deferred-opposite-side-service",
+        "routing_strategy_version": "1.6.0",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }

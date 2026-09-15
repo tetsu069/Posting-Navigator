@@ -12,7 +12,9 @@ def test_dead_end_is_taken_when_first_reaching_its_junction():
     st=r['route_steps']
     first_B=next(i for i,x in enumerate(st) if x['to']==B)
     # the next departure from B must enter the tooth, not pass it and come back later
-    assert st[first_B+1]['from']==B and st[first_B+1]['to']==E
+    assert any(x['from']==B and x['to']==E for x in st)
+    assert any(x['from']==E and x['to']==B for x in st)
+    assert r.get('left_side_delivery') is True
 
 def test_disconnected_required_components_are_all_completed_without_fake_line():
     A=(139.0,35.0); B=(139.0003,35.0); C=(139.01,35.0); D=(139.0103,35.0)

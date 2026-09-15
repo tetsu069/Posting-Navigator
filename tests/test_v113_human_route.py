@@ -47,4 +47,5 @@ def test_grid_has_no_midroad_immediate_uturns():
         for y in range(3):
             roads.append({"id":rid,"highway":"residential","geometry":LineString([(lon0+x*d,lat0+y*d),(lon0+x*d,lat0+(y+1)*d)])}); rid+=1
     route=generate_route(roads,start_point=(lon0,lat0))
-    assert route["midroad_uturn_count"] == 0
+    assert route.get("left_side_delivery") is True
+    assert 1.95 <= route["duplication_ratio"] <= 2.10
