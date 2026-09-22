@@ -1246,33 +1246,69 @@ def _route_parts_from_steps(steps: list[dict]) -> list[LineString]:
 
 
 
-def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: int, seq_start: int = 1):
-    """v1.6.0: road sides are independent service tasks.
+def _service_mode(u, v, data: dict, block_graph: nx.MultiGraph) -> str:
+    """v1.8.0 hybrid posting rule for one physical street segment.
 
-    A physical road has two directed side-service tasks.  We still use an exact
-    balanced directed circuit so every side is served once with no unnecessary
-    third pass, but the chosen circuit is selected from many alternatives with a
-    strong preference to postpone the opposite-side task at normal junctions.
-    True dead ends may reverse immediately.
+    boundary: selected-area side only
+    narrow: both sides can be served in one pass
+    deadend/short: two side tasks; an immediate return is acceptable
+    major/long/normal: two side tasks, but the opposite side should be deferred
+    """
+    if data.get("boundary_single_side"):
+        return "boundary-one-side"
+    highway = str(data.get("highway") or "")
+    length = float(data.get("length", 0.0))
+    # Very narrow residential alleys / pedestrian-scale ways: one walking pass
+    # can realistically cover both frontages without road-crossing zigzags.
+    if highway in {"living_street", "pedestrian", "footway", "path", "steps"} and length <= 90.0:
+        return "narrow-both-sides"
+    if block_graph.degree(u) == 1 or block_graph.degree(v) == 1:
+        return "dead-end"
+    if length <= 42.0:
+        return "short"
+    if highway in {"primary","primary_link","secondary","secondary_link","tertiary","tertiary_link"}:
+        return "major-defer-opposite"
+    if length >= 85.0:
+        return "long-defer-opposite"
+    return "normal-defer-opposite"
+
+
+def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: int, seq_start: int = 1):
+    """v1.8.0 hybrid side-service routing.
+
+    The service unit is a *street side*, not merely a physical edge.  Routing
+    switches behaviour by street shape: boundary roads are serviced only on the
+    selected-area side; very narrow alleys may service both sides in one pass;
+    dead ends and short links may turn back; long/major/ordinary streets defer
+    the opposite-side task so we naturally come back after circulating the block.
     """
     import random
     base=[]; token=0
+    mode_by_token={}
     for u,v,k,data in block_graph.edges(keys=True,data=True):
-        if data.get("boundary_single_side"):
-            # Boundary roads service only the side facing the selected area.
-            # Prefer the direction that keeps that side on the walker's left.
-            a = data.get("boundary_service_from")
-            b = data.get("boundary_service_to")
-            if a not in (u, v) or b not in (u, v) or a == b:
-                a, b = u, v  # safe fallback: still one pass, never a forced round trip
-            d=dict(data); d.update(left_side_pass=True,side_service_task=True,coverage_direction="boundary-inside-left",duplicated=False,boundary_one_side_service=True)
+        mode=_service_mode(u,v,data,block_graph)
+        mode_by_token[token]=mode
+        if mode == "boundary-one-side":
+            a=data.get("boundary_service_from"); b=data.get("boundary_service_to")
+            if a not in (u,v) or b not in (u,v) or a==b: a,b=u,v
+            d=dict(data); d.update(left_side_pass=True,side_service_task=True,
+                coverage_direction="boundary-inside-left",duplicated=False,
+                boundary_one_side_service=True,service_mode=mode)
             base.append((a,b,("boundary-side",token,0),d))
+        elif mode == "narrow-both-sides":
+            # One pass is enough. Direction is selected by the circuit; this task
+            # explicitly records that both frontages are completed together.
+            d=dict(data); d.update(left_side_pass=True,side_service_task=True,
+                coverage_direction="both-sides-narrow",duplicated=False,
+                both_sides_single_pass=True,service_mode=mode)
+            base.append((u,v,("narrow-both",token,0),d))
         else:
             for a,b,side in ((u,v,"left-a"),(v,u,"left-b")):
-                d=dict(data); d.update(left_side_pass=True,side_service_task=True,coverage_direction=side,duplicated=False)
+                d=dict(data); d.update(left_side_pass=True,side_service_task=True,
+                    coverage_direction=side,duplicated=False,service_mode=mode)
                 base.append((a,b,("side",token,0 if a==u else 1),d))
         token+=1
-    if not base: return [],entry
+    if not base:return [],entry
     undeg=dict(block_graph.degree())
     local_entry=entry if entry in block_graph else min(block_graph.nodes,key=lambda n:_dist_m(entry,n))
     def make(order):
@@ -1280,105 +1316,90 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
         for u,v,k,d in order:g.add_edge(u,v,key=k,**dict(d))
         return g
     def score(circ,g):
-        immediate=0; turns=0.0; prev=None
+        # Lexicographic priorities mirror field use: complete a block, keep a
+        # consistent side, avoid U-turns/crossings, then shorten walking.
+        bad_reverse=0.0; major_reverse=0.0; turns=0.0; prev=None
         for i,(u,v,k) in enumerate(circ):
             d=g.get_edge_data(u,v,k); rev=False
             if i:
                 pu,pv,pk=circ[i-1]; rev=(pu==v and pv==u)
-                if rev and undeg.get(u,0)>1: immediate+=1
+                if rev:
+                    mode=str(d.get("service_mode") or "")
+                    L=float(d.get("length",0.0))
+                    if mode in {"dead-end","short"}:
+                        bad_reverse += 0.05 * L  # acceptable local fold-back
+                    elif mode == "major-defer-opposite":
+                        major_reverse += 10000.0 + 100.0*L
+                    else:
+                        bad_reverse += 1000.0 + 20.0*L
             try:
                 br=_edge_departure_bearing(u,v,d)
-                if prev is not None and not (rev and undeg.get(u,0)==1): turns+=abs(((br-prev+540)%360)-180)
+                if prev is not None and not (rev and undeg.get(u,0)==1):turns+=abs(((br-prev+540)%360)-180)
                 prev=br
             except Exception:pass
-        return (immediate,turns)
+        return (major_reverse,bad_reverse,turns)
     orders=[list(base),list(reversed(base))]
-    rng=random.Random(1600+len(base)*17)
-    for _ in range(min(192,max(48,len(base)*4))):
+    rng=random.Random(1800+len(base)*17)
+    for _ in range(min(256,max(64,len(base)*6))):
         z=list(base);rng.shuffle(z);orders.append(z)
     best=None
     for order in orders:
         g=make(order)
         try:
             if nx.is_eulerian(g):
-                trail=list(nx.eulerian_circuit(g,source=local_entry,keys=True))
-                trail_start=local_entry
+                trail=list(nx.eulerian_circuit(g,source=local_entry,keys=True));trail_start=local_entry
             elif nx.has_eulerian_path(g):
-                # One-sided boundary service naturally turns a closed two-side
-                # circuit into an open trail.  This is desirable: do not invent
-                # the reverse boundary pass just to close the circuit.
-                trail=list(nx.eulerian_path(g,keys=True))
-                trail_start=trail[0][0] if trail else local_entry
+                trail=list(nx.eulerian_path(g,keys=True));trail_start=trail[0][0] if trail else local_entry
             else:
-                # v1.7.1: one-side boundary tasks can leave more than two
-                # directed imbalance nodes, so an Euler path need not exist.
-                # Balance only with positioning/transfer traversals on real
-                # roads; never invent the reverse boundary *service* task.
-                bg = g.copy()
-                surplus = []   # needs incoming arc: out > in
-                deficit = []   # needs outgoing arc: in > out
+                bg=g.copy();surplus=[];deficit=[]
                 for n in bg.nodes:
-                    dlt = bg.out_degree(n) - bg.in_degree(n)
-                    if dlt > 0: surplus.extend([n] * dlt)
-                    elif dlt < 0: deficit.extend([n] * (-dlt))
+                    dlt=bg.out_degree(n)-bg.in_degree(n)
+                    if dlt>0:surplus.extend([n]*dlt)
+                    elif dlt<0:deficit.extend([n]*(-dlt))
                 while deficit and surplus:
-                    best_pair = None
-                    for di, a in enumerate(deficit):
-                        try:
-                            lengths = nx.single_source_dijkstra_path_length(block_graph, a, weight="route_cost")
-                        except Exception:
-                            continue
-                        for si, b in enumerate(surplus):
+                    best_pair=None
+                    for di,a in enumerate(deficit):
+                        try:lengths=nx.single_source_dijkstra_path_length(block_graph,a,weight="route_cost")
+                        except Exception:continue
+                        for si,b in enumerate(surplus):
                             if b in lengths:
-                                cand = (float(lengths[b]), di, si, a, b)
-                                if best_pair is None or cand < best_pair:
-                                    best_pair = cand
-                    if best_pair is None:
-                        break
-                    _, di, si, a, b = best_pair
-                    try:
-                        path = nx.shortest_path(block_graph, a, b, weight="route_cost")
-                    except Exception:
-                        break
-                    for pi, (x, y) in enumerate(zip(path, path[1:])):
-                        keyed = block_graph.get_edge_data(x, y) or {}
-                        if not keyed: continue
-                        dd = dict(min(keyed.values(), key=lambda z: float(z.get("route_cost", z.get("length", math.inf)))))
-                        dd.update(left_side_pass=False, side_service_task=False, transfer=True,
-                                  duplicated=True, boundary_balance_transfer=True)
-                        bg.add_edge(x, y, key=("balance", token, len(bg.edges), pi), **dd)
-                    deficit.pop(di); surplus.pop(si)
-                if deficit or surplus or not nx.is_eulerian(bg):
-                    continue
-                g = bg
-                trail=list(nx.eulerian_circuit(g,source=local_entry,keys=True))
-                trail_start=local_entry
-        except Exception:
-            continue
-        sc=score(trail,g)
-        # Prefer a trail whose start is close to the actual block entry.
-        sc=(sc[0], _dist_m(local_entry,trail_start), sc[1])
+                                cand=(float(lengths[b]),di,si,a,b)
+                                if best_pair is None or cand<best_pair:best_pair=cand
+                    if best_pair is None:break
+                    _,di,si,a,b=best_pair
+                    try:path=nx.shortest_path(block_graph,a,b,weight="route_cost")
+                    except Exception:break
+                    for pi,(x,y) in enumerate(zip(path,path[1:])):
+                        keyed=block_graph.get_edge_data(x,y) or {}
+                        if not keyed:continue
+                        dd=dict(min(keyed.values(),key=lambda z:float(z.get("route_cost",z.get("length",math.inf)))))
+                        dd.update(left_side_pass=False,side_service_task=False,transfer=True,duplicated=True,boundary_balance_transfer=True,service_mode="positioning")
+                        bg.add_edge(x,y,key=("balance",token,len(bg.edges),pi),**dd)
+                    deficit.pop(di);surplus.pop(si)
+                if deficit or surplus or not nx.is_eulerian(bg):continue
+                g=bg;trail=list(nx.eulerian_circuit(g,source=local_entry,keys=True));trail_start=local_entry
+        except Exception:continue
+        sc=score(trail,g);sc=(sc[0],sc[1],_dist_m(local_entry,trail_start),sc[2])
         if best is None or sc<best[0]:best=(sc,trail,g,trail_start)
-    if best is None:raise nx.NetworkXError("左右配布タスクを小区画内で完了できません")
+    if best is None:raise nx.NetworkXError("ハイブリッド配布タスクを小区画内で完了できません")
     _,circ,g,trail_start=best
     steps=[];seq=seq_start;current=local_entry
-    if current != trail_start:
-        try:
-            prefix=nx.shortest_path(block_graph,current,trail_start,weight="route_cost")
-        except Exception:
-            prefix=[]
+    if current!=trail_start:
+        try:prefix=nx.shortest_path(block_graph,current,trail_start,weight="route_cost")
+        except Exception:prefix=[]
         for a,b in zip(prefix,prefix[1:]):
             keyed=block_graph.get_edge_data(a,b) or {}
-            if not keyed: continue
+            if not keyed:continue
             d=dict(min(keyed.values(),key=lambda x:float(x.get("length",math.inf))))
-            st=_step(a,b,d,seq,transfer=True,component=component)
-            st["left_side_pass"]=False; st["boundary_positioning_transfer"]=True
+            st=_step(a,b,d,seq,transfer=True,component=component);st["left_side_pass"]=False;st["boundary_positioning_transfer"]=True;st["service_mode"]="positioning"
             steps.append(st);seq+=1;current=b
     for u,v,k in circ:
-        d=dict(g.get_edge_data(u,v,k)); is_transfer=bool(d.get("boundary_balance_transfer"))
+        d=dict(g.get_edge_data(u,v,k));is_transfer=bool(d.get("boundary_balance_transfer"))
         st=_step(u,v,d,seq,transfer=is_transfer,component=component)
         st["left_side_pass"]=not is_transfer;st["side_service_task"]=not is_transfer;st["coverage_direction"]=d.get("coverage_direction") if not is_transfer else None
-        if is_transfer: st["boundary_balance_transfer"]=True
+        st["service_mode"]=d.get("service_mode")
+        if d.get("both_sides_single_pass"):st["both_sides_single_pass"]=True
+        if is_transfer:st["boundary_balance_transfer"]=True
         steps.append(st);seq+=1;current=v
     return steps,current
 
@@ -1430,7 +1451,7 @@ def _shortest_transfer_path_left_mode(full: nx.MultiGraph, source, targets: set,
 
 
 def _edge_coverage_walk(required: nx.MultiGraph, full: nx.MultiGraph, start, *, component: int = 1):
-    """v1.6.0 SIDE-SERVICE TASKS + hard small-block completion.
+    """v1.8.0 HYBRID SIDE-SERVICE + hard small-block completion.
 
     Rules:
       * Deliver to houses on the walker's LEFT.
@@ -1680,17 +1701,21 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
             f"配布対象道路に未巡回区間が残っています（{len(missing_sigs)}区間、約{missing_len:.0f}m）。完成扱いにしません。"
         )
 
-    # v1.6.0 SIDE-SERVICE GUARANTEE: every required physical segment must appear in
+    # v1.8.0 HYBRID SIDE-SERVICE GUARANTEE: every required physical segment must appear in
     # both directions among coverage (non-transfer) steps.  One-sided completion is
     # not accepted because it would leave the houses on one side unserved.
     directed_required = set()
     for u, v, _, data in required_graph.edges(keys=True, data=True):
         sig = _edge_sig(u, v, data.get("geometry", LineString([u, v])))
-        if data.get("boundary_single_side"):
+        mode = _service_mode(u, v, data, required_graph)
+        if mode == "boundary-one-side":
             a=data.get("boundary_service_from"); b=data.get("boundary_service_to")
             if a not in (u,v) or b not in (u,v) or a == b:
                 a,b=u,v
             directed_required.add((sig, tuple(a), tuple(b)))
+        elif mode == "narrow-both-sides":
+            # Either direction completes both frontages on a genuinely narrow way.
+            directed_required.add((sig, None, None))
         else:
             directed_required.add((sig, tuple(u), tuple(v)))
             directed_required.add((sig, tuple(v), tuple(u)))
@@ -1700,10 +1725,12 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
             continue
         sig = _edge_sig(st["from"], st["to"], st["geometry"])
         directed_seen.add((sig, tuple(st["from"]), tuple(st["to"])))
+        if st.get("both_sides_single_pass"):
+            directed_seen.add((sig, None, None))
     directional_missing = directed_required - directed_seen
     if directional_missing:
         raise ValueError(
-            f"左側配布モードで片方向しか通っていない道路があります（{len(directional_missing)}方向）。完成扱いにしません。"
+            f"ハイブリッド配布モードで未処理の道路面があります（{len(directional_missing)}方向）。完成扱いにしません。"
         )
 
     parts = _route_parts_from_steps(steps)
@@ -1751,7 +1778,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "side-service-task-block-completion",
         "component_routing": "deferred-opposite-side-service",
-        "routing_strategy_version": "1.7.1",
+        "routing_strategy_version": "1.8.0",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
