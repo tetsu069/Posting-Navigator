@@ -249,7 +249,7 @@ def _simplify_degree_two(graph: nx.MultiGraph) -> nx.MultiGraph:
             # required/optional の境界は交差点として保持し、配布道路と移動道路を混ぜない。
             if bool(d1.get("required", True)) != bool(d2.get("required", True)):
                 continue
-            # v1.7.0: boundary roads carry a directed one-side service marker.
+            # v1.7.1: boundary roads carry a directed one-side service marker.
             # Keep their original segments so that direction is never lost while
             # degree-two simplification merges geometry.
             if bool(d1.get("boundary_near")) or bool(d2.get("boundary_near")):
@@ -1310,7 +1310,49 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                 trail=list(nx.eulerian_path(g,keys=True))
                 trail_start=trail[0][0] if trail else local_entry
             else:
-                continue
+                # v1.7.1: one-side boundary tasks can leave more than two
+                # directed imbalance nodes, so an Euler path need not exist.
+                # Balance only with positioning/transfer traversals on real
+                # roads; never invent the reverse boundary *service* task.
+                bg = g.copy()
+                surplus = []   # needs incoming arc: out > in
+                deficit = []   # needs outgoing arc: in > out
+                for n in bg.nodes:
+                    dlt = bg.out_degree(n) - bg.in_degree(n)
+                    if dlt > 0: surplus.extend([n] * dlt)
+                    elif dlt < 0: deficit.extend([n] * (-dlt))
+                while deficit and surplus:
+                    best_pair = None
+                    for di, a in enumerate(deficit):
+                        try:
+                            lengths = nx.single_source_dijkstra_path_length(block_graph, a, weight="route_cost")
+                        except Exception:
+                            continue
+                        for si, b in enumerate(surplus):
+                            if b in lengths:
+                                cand = (float(lengths[b]), di, si, a, b)
+                                if best_pair is None or cand < best_pair:
+                                    best_pair = cand
+                    if best_pair is None:
+                        break
+                    _, di, si, a, b = best_pair
+                    try:
+                        path = nx.shortest_path(block_graph, a, b, weight="route_cost")
+                    except Exception:
+                        break
+                    for pi, (x, y) in enumerate(zip(path, path[1:])):
+                        keyed = block_graph.get_edge_data(x, y) or {}
+                        if not keyed: continue
+                        dd = dict(min(keyed.values(), key=lambda z: float(z.get("route_cost", z.get("length", math.inf)))))
+                        dd.update(left_side_pass=False, side_service_task=False, transfer=True,
+                                  duplicated=True, boundary_balance_transfer=True)
+                        bg.add_edge(x, y, key=("balance", token, len(bg.edges), pi), **dd)
+                    deficit.pop(di); surplus.pop(si)
+                if deficit or surplus or not nx.is_eulerian(bg):
+                    continue
+                g = bg
+                trail=list(nx.eulerian_circuit(g,source=local_entry,keys=True))
+                trail_start=local_entry
         except Exception:
             continue
         sc=score(trail,g)
@@ -1333,8 +1375,10 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
             st["left_side_pass"]=False; st["boundary_positioning_transfer"]=True
             steps.append(st);seq+=1;current=b
     for u,v,k in circ:
-        d=dict(g.get_edge_data(u,v,k));st=_step(u,v,d,seq,transfer=False,component=component)
-        st["left_side_pass"]=True;st["side_service_task"]=True;st["coverage_direction"]=d.get("coverage_direction")
+        d=dict(g.get_edge_data(u,v,k)); is_transfer=bool(d.get("boundary_balance_transfer"))
+        st=_step(u,v,d,seq,transfer=is_transfer,component=component)
+        st["left_side_pass"]=not is_transfer;st["side_service_task"]=not is_transfer;st["coverage_direction"]=d.get("coverage_direction") if not is_transfer else None
+        if is_transfer: st["boundary_balance_transfer"]=True
         steps.append(st);seq+=1;current=v
     return steps,current
 
@@ -1707,7 +1751,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "side-service-task-block-completion",
         "component_routing": "deferred-opposite-side-service",
-        "routing_strategy_version": "1.7.0",
+        "routing_strategy_version": "1.7.1",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
