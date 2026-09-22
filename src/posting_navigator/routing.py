@@ -249,6 +249,11 @@ def _simplify_degree_two(graph: nx.MultiGraph) -> nx.MultiGraph:
             # required/optional の境界は交差点として保持し、配布道路と移動道路を混ぜない。
             if bool(d1.get("required", True)) != bool(d2.get("required", True)):
                 continue
+            # v1.7.0: boundary roads carry a directed one-side service marker.
+            # Keep their original segments so that direction is never lost while
+            # degree-two simplification merges geometry.
+            if bool(d1.get("boundary_near")) or bool(d2.get("boundary_near")):
+                continue
             highway = d1.get("highway") if d1.get("highway") == d2.get("highway") else (d1.get("highway") or d2.get("highway") or "")
             name = d1.get("name") if d1.get("name") == d2.get("name") else (d1.get("name") or d2.get("name") or "")
             osm_id = d1.get("osm_id") if d1.get("osm_id") == d2.get("osm_id") else None
@@ -295,6 +300,19 @@ def build_graph(roads: list[dict]) -> nx.MultiGraph:
             # 境界道路は1回は必ず通るが、補完目的の2回目以降はさらに避ける。
             if bool(source.get("boundary_near", False)):
                 dup_penalty *= 2.0
+            boundary_service_from = boundary_service_to = None
+            if bool(source.get("boundary_near", False)) and source.get("boundary_inside_left") is not None:
+                try:
+                    sg = source.get("geometry")
+                    pu = sg.project(Point(u)); pv = sg.project(Point(v))
+                    same = pv >= pu
+                    inside_left_uv = bool(source.get("boundary_inside_left")) if same else not bool(source.get("boundary_inside_left"))
+                    if inside_left_uv:
+                        boundary_service_from, boundary_service_to = u, v
+                    else:
+                        boundary_service_from, boundary_service_to = v, u
+                except Exception:
+                    pass
             graph.add_edge(
                 u, v,
                 length=length,
@@ -304,6 +322,9 @@ def build_graph(roads: list[dict]) -> nx.MultiGraph:
                 name=source.get("name", ""),
                 osm_id=source.get("id"),
                 boundary_near=bool(source.get("boundary_near", False)),
+                boundary_single_side=bool(source.get("boundary_near", False)),
+                boundary_service_from=boundary_service_from,
+                boundary_service_to=boundary_service_to,
                 required=bool(source.get("required", True)),
                 geometry=segment,
             )
@@ -1237,9 +1258,19 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
     import random
     base=[]; token=0
     for u,v,k,data in block_graph.edges(keys=True,data=True):
-        for a,b,side in ((u,v,"left-a"),(v,u,"left-b")):
-            d=dict(data); d.update(left_side_pass=True,side_service_task=True,coverage_direction=side,duplicated=False)
-            base.append((a,b,("side",token,0 if a==u else 1),d))
+        if data.get("boundary_single_side"):
+            # Boundary roads service only the side facing the selected area.
+            # Prefer the direction that keeps that side on the walker's left.
+            a = data.get("boundary_service_from")
+            b = data.get("boundary_service_to")
+            if a not in (u, v) or b not in (u, v) or a == b:
+                a, b = u, v  # safe fallback: still one pass, never a forced round trip
+            d=dict(data); d.update(left_side_pass=True,side_service_task=True,coverage_direction="boundary-inside-left",duplicated=False,boundary_one_side_service=True)
+            base.append((a,b,("boundary-side",token,0),d))
+        else:
+            for a,b,side in ((u,v,"left-a"),(v,u,"left-b")):
+                d=dict(data); d.update(left_side_pass=True,side_service_task=True,coverage_direction=side,duplicated=False)
+                base.append((a,b,("side",token,0 if a==u else 1),d))
         token+=1
     if not base: return [],entry
     undeg=dict(block_graph.degree())
@@ -1268,13 +1299,39 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
     best=None
     for order in orders:
         g=make(order)
-        try:circ=list(nx.eulerian_circuit(g,source=local_entry,keys=True))
-        except Exception:continue
-        sc=score(circ,g)
-        if best is None or sc<best[0]:best=(sc,circ,g)
+        try:
+            if nx.is_eulerian(g):
+                trail=list(nx.eulerian_circuit(g,source=local_entry,keys=True))
+                trail_start=local_entry
+            elif nx.has_eulerian_path(g):
+                # One-sided boundary service naturally turns a closed two-side
+                # circuit into an open trail.  This is desirable: do not invent
+                # the reverse boundary pass just to close the circuit.
+                trail=list(nx.eulerian_path(g,keys=True))
+                trail_start=trail[0][0] if trail else local_entry
+            else:
+                continue
+        except Exception:
+            continue
+        sc=score(trail,g)
+        # Prefer a trail whose start is close to the actual block entry.
+        sc=(sc[0], _dist_m(local_entry,trail_start), sc[1])
+        if best is None or sc<best[0]:best=(sc,trail,g,trail_start)
     if best is None:raise nx.NetworkXError("左右配布タスクを小区画内で完了できません")
-    _,circ,g=best
+    _,circ,g,trail_start=best
     steps=[];seq=seq_start;current=local_entry
+    if current != trail_start:
+        try:
+            prefix=nx.shortest_path(block_graph,current,trail_start,weight="route_cost")
+        except Exception:
+            prefix=[]
+        for a,b in zip(prefix,prefix[1:]):
+            keyed=block_graph.get_edge_data(a,b) or {}
+            if not keyed: continue
+            d=dict(min(keyed.values(),key=lambda x:float(x.get("length",math.inf))))
+            st=_step(a,b,d,seq,transfer=True,component=component)
+            st["left_side_pass"]=False; st["boundary_positioning_transfer"]=True
+            steps.append(st);seq+=1;current=b
     for u,v,k in circ:
         d=dict(g.get_edge_data(u,v,k));st=_step(u,v,d,seq,transfer=False,component=component)
         st["left_side_pass"]=True;st["side_service_task"]=True;st["coverage_direction"]=d.get("coverage_direction")
@@ -1585,8 +1642,14 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
     directed_required = set()
     for u, v, _, data in required_graph.edges(keys=True, data=True):
         sig = _edge_sig(u, v, data.get("geometry", LineString([u, v])))
-        directed_required.add((sig, tuple(u), tuple(v)))
-        directed_required.add((sig, tuple(v), tuple(u)))
+        if data.get("boundary_single_side"):
+            a=data.get("boundary_service_from"); b=data.get("boundary_service_to")
+            if a not in (u,v) or b not in (u,v) or a == b:
+                a,b=u,v
+            directed_required.add((sig, tuple(a), tuple(b)))
+        else:
+            directed_required.add((sig, tuple(u), tuple(v)))
+            directed_required.add((sig, tuple(v), tuple(u)))
     directed_seen = set()
     for st in steps:
         if st.get("transfer"):
@@ -1633,8 +1696,9 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "major_road_duplicated_m": round(major_duplicated, 1),
         "duplication_ratio": round((route_length - transfer_length) / max(source_length, 1.0), 3),
         "left_side_delivery": True,
-        "expected_two_side_ratio": 2.0,
-        "excess_over_two_side_m": round(max(0.0, (route_length - transfer_length) - 2.0 * source_length), 1),
+        "expected_two_side_ratio": round((2.0 * source_length - sum(float(d.get("length", 0.0)) for _,_,d in required_graph.edges(data=True) if d.get("boundary_single_side"))) / max(source_length, 1.0), 3),
+        "excess_over_two_side_m": round(max(0.0, (route_length - transfer_length) - (2.0 * source_length - sum(float(d.get("length", 0.0)) for _,_,d in required_graph.edges(data=True) if d.get("boundary_single_side")))), 1),
+        "boundary_one_side_length_m": round(sum(float(d.get("length", 0.0)) for _,_,d in required_graph.edges(data=True) if d.get("boundary_single_side")), 1),
         "connected_nodes": required_graph.number_of_nodes(),
         "component_count": total_required_components,
         "cluster_count": optimized_components,
@@ -1643,7 +1707,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "side-service-task-block-completion",
         "component_routing": "deferred-opposite-side-service",
-        "routing_strategy_version": "1.6.0",
+        "routing_strategy_version": "1.7.0",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }

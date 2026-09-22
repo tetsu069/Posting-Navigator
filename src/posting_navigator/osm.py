@@ -528,11 +528,39 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
                 if not (highway in walk_required and in_park_ratio >= 0.65):
                     required = True
 
+            # v1.7.0: a road running along the area boundary only has houses on
+            # the area side to service.  Record which side of the stored line is
+            # toward the target polygon so routing can traverse it exactly once,
+            # with that side on the walker's left.
+            boundary_inside_left = None
+            if boundary_near and geom_m.length > 0.5:
+                try:
+                    mid = geom_m.interpolate(0.5, normalized=True)
+                    eps = min(2.0, max(0.25, geom_m.length * 0.05))
+                    a = geom_m.interpolate(max(0.0, geom_m.project(mid) - eps))
+                    b = geom_m.interpolate(min(geom_m.length, geom_m.project(mid) + eps))
+                    dx, dy = b.x - a.x, b.y - a.y
+                    norm = max((dx * dx + dy * dy) ** 0.5, 1e-9)
+                    # Use a generous probe because rescued OSM centerlines may lie
+                    # several metres outside the administrative polygon.
+                    probe = 20.0
+                    lp = Point(mid.x - dy / norm * probe, mid.y + dx / norm * probe)
+                    rp = Point(mid.x + dy / norm * probe, mid.y - dx / norm * probe)
+                    ld = boundary_m.distance(lp)
+                    rd = boundary_m.distance(rp)
+                    if boundary_m.covers(lp) != boundary_m.covers(rp):
+                        boundary_inside_left = bool(boundary_m.covers(lp))
+                    else:
+                        boundary_inside_left = ld <= rd
+                except Exception:
+                    boundary_inside_left = None
+
             geom = transform(inv, geom_m)
             roads.append({
                 "id": element.get("id"), "highway": highway, "name": tags.get("name", ""),
                 "access": access, "service": service,
                 "foot": tags.get("foot", ""), "boundary_near": boundary_near,
+                "boundary_inside_left": boundary_inside_left,
                 "boundary_clip_tail": boundary_clip_tail, "required": required,
                 "geometry": geom, "_geom_m": geom_m,
             })
