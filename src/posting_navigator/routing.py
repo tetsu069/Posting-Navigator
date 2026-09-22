@@ -1247,7 +1247,7 @@ def _route_parts_from_steps(steps: list[dict]) -> list[LineString]:
 
 
 def _service_mode(u, v, data: dict, block_graph: nx.MultiGraph) -> str:
-    """v1.8.1 hybrid posting rule for one physical street segment.
+    """v1.8.2 hybrid posting rule for one physical street segment.
 
     boundary: selected-area side only
     narrow: both sides can be served in one pass
@@ -1273,8 +1273,8 @@ def _service_mode(u, v, data: dict, block_graph: nx.MultiGraph) -> str:
     return "normal-defer-opposite"
 
 
-def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: int, seq_start: int = 1):
-    """v1.8.1 hybrid side-service routing.
+def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: int, seq_start: int = 1, movement_graph: nx.MultiGraph | None = None):
+    """v1.8.2 hybrid side-service routing.
 
     The service unit is a *street side*, not merely a physical edge.  Routing
     switches behaviour by street shape: boundary roads are serviced only on the
@@ -1283,6 +1283,7 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
     the opposite-side task so we naturally come back after circulating the block.
     """
     import random
+    movement_graph = movement_graph or block_graph
     base=[]; token=0
     mode_by_token={}
     for u,v,k,data in block_graph.edges(keys=True,data=True):
@@ -1309,7 +1310,10 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                 base.append((a,b,("side",token,0 if a==u else 1),d))
         token+=1
     if not base:return [],entry
-    undeg=dict(block_graph.degree())
+    # IMPORTANT: use the full in-area movement graph degree, not the temporary
+    # small-block subgraph degree. A block cut can make the middle of a perfectly
+    # continuous street look like degree 1 and used to create the false 1->2 U-turn.
+    undeg=dict(movement_graph.degree())
     local_entry=entry if entry in block_graph else min(block_graph.nodes,key=lambda n:_dist_m(entry,n))
     def make(order):
         g=nx.MultiDiGraph()
@@ -1365,7 +1369,7 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                 if rev:
                     mode=str(d.get("service_mode") or "")
                     L=float(d.get("length",0.0))
-                    # v1.8.1: "short" alone is NOT a reason to U-turn.  OSM
+                    # v1.8.2: "short" alone is NOT a reason to U-turn.  OSM
                     # often splits one continuous street into short pieces, which
                     # caused the 1->2 mid-road foldback.  Cheap immediate return
                     # is allowed only at a genuine degree-1 dead end.  Everywhere
@@ -1408,7 +1412,7 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                 while deficit and surplus:
                     best_pair=None
                     for di,a in enumerate(deficit):
-                        try:lengths=nx.single_source_dijkstra_path_length(block_graph,a,weight="route_cost")
+                        try:lengths=nx.single_source_dijkstra_path_length(movement_graph,a,weight="route_cost")
                         except Exception:continue
                         for si,b in enumerate(surplus):
                             if b in lengths:
@@ -1416,10 +1420,10 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                                 if best_pair is None or cand<best_pair:best_pair=cand
                     if best_pair is None:break
                     _,di,si,a,b=best_pair
-                    try:path=nx.shortest_path(block_graph,a,b,weight="route_cost")
+                    try:path=nx.shortest_path(movement_graph,a,b,weight="route_cost")
                     except Exception:break
                     for pi,(x,y) in enumerate(zip(path,path[1:])):
-                        keyed=block_graph.get_edge_data(x,y) or {}
+                        keyed=movement_graph.get_edge_data(x,y) or {}
                         if not keyed:continue
                         dd=dict(min(keyed.values(),key=lambda z:float(z.get("route_cost",z.get("length",math.inf)))))
                         dd.update(left_side_pass=False,side_service_task=False,transfer=True,duplicated=True,boundary_balance_transfer=True,service_mode="positioning")
@@ -1434,10 +1438,10 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
     _,circ,g,trail_start=best
     steps=[];seq=seq_start;current=local_entry
     if current!=trail_start:
-        try:prefix=nx.shortest_path(block_graph,current,trail_start,weight="route_cost")
+        try:prefix=nx.shortest_path(movement_graph,current,trail_start,weight="route_cost")
         except Exception:prefix=[]
         for a,b in zip(prefix,prefix[1:]):
-            keyed=block_graph.get_edge_data(a,b) or {}
+            keyed=movement_graph.get_edge_data(a,b) or {}
             if not keyed:continue
             d=dict(min(keyed.values(),key=lambda x:float(x.get("length",math.inf))))
             st=_step(a,b,d,seq,transfer=True,component=component);st["left_side_pass"]=False;st["boundary_positioning_transfer"]=True;st["service_mode"]="positioning"
@@ -1500,7 +1504,7 @@ def _shortest_transfer_path_left_mode(full: nx.MultiGraph, source, targets: set,
 
 
 def _edge_coverage_walk(required: nx.MultiGraph, full: nx.MultiGraph, start, *, component: int = 1):
-    """v1.8.1 HYBRID SIDE-SERVICE + hard small-block completion.
+    """v1.8.2 HYBRID SIDE-SERVICE + hard small-block completion.
 
     Rules:
       * Deliver to houses on the walker's LEFT.
@@ -1612,7 +1616,7 @@ def _edge_coverage_walk(required: nx.MultiGraph, full: nx.MultiGraph, start, *, 
                     current = b
 
             entry = current if current in piece else min(piece.nodes, key=lambda n: _dist_m(current, n))
-            local_steps, current = _side_task_block_circuit(piece, entry, component=component, seq_start=len(steps)+1)
+            local_steps, current = _side_task_block_circuit(piece, entry, component=component, seq_start=len(steps)+1, movement_graph=full)
             for st in local_steps:
                 steps.append(st)
                 used_pairs.add(_edge_pair_key(st["from"], st["to"]))
@@ -1750,7 +1754,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
             f"配布対象道路に未巡回区間が残っています（{len(missing_sigs)}区間、約{missing_len:.0f}m）。完成扱いにしません。"
         )
 
-    # v1.8.1 HYBRID SIDE-SERVICE GUARANTEE: every required physical segment must appear in
+    # v1.8.2 HYBRID SIDE-SERVICE GUARANTEE: every required physical segment must appear in
     # both directions among coverage (non-transfer) steps.  One-sided completion is
     # not accepted because it would leave the houses on one side unserved.
     directed_required = set()

@@ -1,7 +1,7 @@
 const configured=(window.POSTING_NAVIGATOR_API||'').replace(/\/$/,'');
 const API=configured || location.origin;
 const $=id=>document.getElementById(id);
-const state={uploadId:null,jobId:null,geojson:null,areaGeojson:null,summary:null,projectId:null,shareCode:null,workerId:1,watchId:null,current:null,completed:new Set(),segments:[],segmentLengths:[],layers:{},syncTimer:null,config:{gps_threshold_m:18,sync_interval_ms:5000},areaInfo:{},fieldGuideLeg:0,lastPosition:null,sessionToken:localStorage.getItem('pn_session')||'',user:null,navLegs:[],startPickMode:false,activeGuideLeg:0,forceOsmRefresh:false};
+const state={uploadId:null,jobId:null,geojson:null,areaGeojson:null,summary:null,projectId:null,shareCode:null,workerId:1,watchId:null,current:null,completed:new Set(),segments:[],segmentLengths:[],layers:{},syncTimer:null,config:{gps_threshold_m:18,sync_interval_ms:5000},areaInfo:{},fieldGuideLeg:0,lastPosition:null,sessionToken:localStorage.getItem('pn_session')||'',user:null,navLegs:[],startPickMode:false,activeGuideLeg:0,forceOsmRefresh:false,guidePassed:new Set()};
 const map=L.map('map').setView([35.7005,139.6925],16);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'© OpenStreetMap contributors'}).addTo(map);
 
@@ -96,7 +96,7 @@ function navigationLegFeatures(){return (state.geojson?.features||[]).filter(f=>
 function renderGeneratedMap(){
   clearRouteLayers();
   const steps=routeStepFeatures(), legs=navigationLegFeatures();
-  state.navLegs=legs;state.activeGuideLeg=0;
+  state.navLegs=legs;state.activeGuideLeg=0;state.guidePassed=new Set();
   const hasSteps=steps.length>0;
   state.layers.generated=L.geoJSON(state.geojson,{
     filter:f=>{const k=f.properties?.kind;return k!=='navigation_leg' && !(hasSteps&&(k==='route'||k==='worker_route'))},
@@ -113,7 +113,7 @@ function renderGeneratedMap(){
   if(legs.length)focusGuideLeg(0,false);
   const b=state.layers.generated.getBounds();if(b.isValid())map.fitBounds(b,{padding:[15,15]})
 }
-function clearRouteLayers(){['generated','todo','done','gps','directions','sequence','focus','nextPreview'].forEach(k=>{if(state.layers[k]){state.layers[k].remove();state.layers[k]=null}})}
+function clearRouteLayers(){['generated','todo','done','gps','directions','sequence','focus','nextPreview','guideProgress'].forEach(k=>{if(state.layers[k]){state.layers[k].remove();state.layers[k]=null}})}
 function bearingDeg(a,b){const p=Math.PI/180,y=Math.sin((b[0]-a[0])*p)*Math.cos(b[1]*p),x=Math.cos(a[1]*p)*Math.sin(b[1]*p)-Math.sin(a[1]*p)*Math.cos(b[1]*p)*Math.cos((b[0]-a[0])*p);return(Math.atan2(y,x)/p+360)%360}
 function interpolateCoord(a,b,t){return[a[0]+(b[0]-a[0])*t,a[1]+(b[1]-a[1])*t]}
 function arrowSvg(){return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 1.5 4.5 10H9v12h6V10h4.5z"/></svg>'}
@@ -132,6 +132,9 @@ function arrowMarkersForLeg(feature){
   const {total}=lineLengths(c);const ds=total<35?[total*.5]:total<90?[total*.35,total*.72]:[total*.22,total*.50,total*.78];
   ds.forEach(d=>{const m=tangentAtDistance(c,d);if(!m?.pt)return;L.marker([m.pt[1],m.pt[0]],{interactive:false,icon:L.divIcon({className:'route-arrow-wrap',html:`<div class="route-arrow selected" style="transform:rotate(${m.bearing}deg)">${arrowSvg()}</div>`,iconSize:[30,30],iconAnchor:[15,15]})}).addTo(g)});return g;
 }
+function guideRoadKey(f){const c=f?.geometry?.coordinates||[];if(c.length<2)return '';const a=c[0],b=c[c.length-1],q=p=>`${p[0].toFixed(5)},${p[1].toFixed(5)}`;return [q(a),q(b)].sort().join('|')}
+function drawGuideProgress(){if(state.layers.guideProgress)state.layers.guideProgress.remove();const g=L.layerGroup(),counts=new Map();for(const i of state.guidePassed||[]){const f=state.navLegs[i];if(!f)continue;const k=guideRoadKey(f);counts.set(k,(counts.get(k)||0)+1)}for(const i of state.guidePassed||[]){const f=state.navLegs[i];if(!f)continue;const twice=(counts.get(guideRoadKey(f))||0)>=2;L.geoJSON(f,{style:{color:twice?'#22c55e':'#2563eb',weight:twice?9:8,opacity:.94,lineCap:'round',lineJoin:'round'}}).addTo(g)}state.layers.guideProgress=g.addTo(map)}
+function markGuideLegPassed(index){if(index<0||index>=state.navLegs.length)return;state.guidePassed.add(index);drawGuideProgress()}
 function focusGuideLeg(index,fit=true){
   if(!state.navLegs?.length)return;index=Math.max(0,Math.min(state.navLegs.length-1,index));state.activeGuideLeg=index;
   if(state.layers.focus)state.layers.focus.remove();if(state.layers.directions)state.layers.directions.remove();if(state.layers.nextPreview)state.layers.nextPreview.remove();
@@ -152,7 +155,7 @@ function renderRouteGuide(legs){
   box.innerHTML=`<h3>開始地点からの最適巡回順</h3><div class="hint">上から1→2→3…の順に進みます。項目をクリックすると、その区間だけ地図上で青く強調します。</div><div class="guide-controller"><button id="guidePrev" class="secondary">← 前へ</button><div><strong id="guideCounter">1 / ${legs.length}</strong><div id="guideCurrent" class="guide-current"></div></div><button id="guideNext" class="secondary">次へ →</button></div><div class="guide-list">${legs.map((f,i)=>`<button class="guide-item" data-index="${i}"><div class="guide-num">${f.properties.leg}</div><div><b>${escapeHtml(f.properties.turn||'進む')} ・ ${Math.round(f.properties.length_m||0)}m</b><span>${escapeHtml(f.properties.component_break_before?(f.properties.instruction||'次の道路群へ移動'): (f.properties.name||f.properties.instruction||'道路に沿って進む'))}</span></div></button>`).join('')}</div>`;
   box.classList.remove('hidden');
   box.querySelectorAll('.guide-item').forEach(el=>el.onclick=()=>focusGuideLeg(+el.dataset.index,true));
-  $('guidePrev').onclick=()=>focusGuideLeg(state.activeGuideLeg-1,true);$('guideNext').onclick=()=>focusGuideLeg(state.activeGuideLeg+1,true);
+  $('guidePrev').onclick=()=>focusGuideLeg(state.activeGuideLeg-1,true);$('guideNext').onclick=()=>{markGuideLegPassed(state.activeGuideLeg);focusGuideLeg(state.activeGuideLeg+1,true)};
   focusGuideLeg(0,false);
 }
 function distanceToFeatureMeters(lat,lon,f){let best=Infinity,c=f?.geometry?.coordinates||[];for(let j=0;j<c.length-1;j++)best=Math.min(best,pointSegmentMeters(lat,lon,c[j][1],c[j][0],c[j+1][1],c[j+1][0]));return best}
