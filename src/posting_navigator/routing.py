@@ -1247,7 +1247,7 @@ def _route_parts_from_steps(steps: list[dict]) -> list[LineString]:
 
 
 def _service_mode(u, v, data: dict, block_graph: nx.MultiGraph) -> str:
-    """v1.8.0 hybrid posting rule for one physical street segment.
+    """v1.8.1 hybrid posting rule for one physical street segment.
 
     boundary: selected-area side only
     narrow: both sides can be served in one pass
@@ -1274,7 +1274,7 @@ def _service_mode(u, v, data: dict, block_graph: nx.MultiGraph) -> str:
 
 
 def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: int, seq_start: int = 1):
-    """v1.8.0 hybrid side-service routing.
+    """v1.8.1 hybrid side-service routing.
 
     The service unit is a *street side*, not merely a physical edge.  Routing
     switches behaviour by street shape: boundary roads are serviced only on the
@@ -1315,9 +1315,48 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
         g=nx.MultiDiGraph()
         for u,v,k,d in order:g.add_edge(u,v,key=k,**dict(d))
         return g
+    def euler_circuit_avoid_reverse(g, source, seed=0):
+        """Directed Hierholzer with a preference against immediately taking the
+        same physical edge back.  This is ordering only; all service tasks remain.
+        """
+        import random
+        rng=random.Random(seed)
+        adj={n:list(g.out_edges(n,keys=True)) for n in g.nodes}
+        for n in adj:rng.shuffle(adj[n])
+        used=set(); stack=[(source,None)]; edge_stack=[]; circuit=[]
+        while stack:
+            u,prev=stack[-1]
+            choices=[]
+            for e in adj.get(u,[]):
+                if e in used:continue
+                _,v,k=e
+                reverse=(prev is not None and v==prev)
+                # true dead ends may reverse; otherwise consume a continuation first
+                pri=(1 if reverse and undeg.get(u,0)!=1 else 0, rng.random())
+                choices.append((pri,e))
+            if choices:
+                _,e=min(choices,key=lambda x:x[0]); _,v,k=e; used.add(e)
+                stack.append((v,u)); edge_stack.append(e)
+            else:
+                stack.pop()
+                if edge_stack:circuit.append(edge_stack.pop())
+        circuit.reverse()
+        return circuit if len(circuit)==g.number_of_edges() else []
+
     def score(circ,g):
         # Lexicographic priorities mirror field use: complete a block, keep a
         # consistent side, avoid U-turns/crossings, then shorten walking.
+        def real_corner(node):
+            # Degree-2 OSM nodes may be either a true street corner or merely a
+            # split point on one straight street.  Only the former is a sensible
+            # place to switch to the opposite frontage.
+            if undeg.get(node,0) != 2:return False
+            nbrs=list(block_graph.neighbors(node))
+            if len(nbrs)!=2:return False
+            b1=_bearing(node,nbrs[0]); b2=_bearing(node,nbrs[1])
+            # straight continuation has ~180deg between rays; a corner is lower.
+            sep=abs(((b2-b1+540)%360)-180)
+            return sep < 145.0
         bad_reverse=0.0; major_reverse=0.0; turns=0.0; prev=None
         for i,(u,v,k) in enumerate(circ):
             d=g.get_edge_data(u,v,k); rev=False
@@ -1326,12 +1365,22 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                 if rev:
                     mode=str(d.get("service_mode") or "")
                     L=float(d.get("length",0.0))
-                    if mode in {"dead-end","short"}:
-                        bad_reverse += 0.05 * L  # acceptable local fold-back
+                    # v1.8.1: "short" alone is NOT a reason to U-turn.  OSM
+                    # often splits one continuous street into short pieces, which
+                    # caused the 1->2 mid-road foldback.  Cheap immediate return
+                    # is allowed only at a genuine degree-1 dead end.  Everywhere
+                    # else it receives a dominant penalty, so the route continues
+                    # to the next junction / around the block first.
+                    if undeg.get(u,0) == 1:
+                        bad_reverse += 0.02 * L
+                    elif real_corner(u):
+                        # A genuine bend/corner is acceptable when a side switch
+                        # is unavoidable; a straight degree-2 split is not.
+                        bad_reverse += 2.0 * L
                     elif mode == "major-defer-opposite":
-                        major_reverse += 10000.0 + 100.0*L
+                        major_reverse += 1000000.0 + 1000.0*L
                     else:
-                        bad_reverse += 1000.0 + 20.0*L
+                        bad_reverse += 500000.0 + 500.0*L
             try:
                 br=_edge_departure_bearing(u,v,d)
                 if prev is not None and not (rev and undeg.get(u,0)==1):turns+=abs(((br-prev+540)%360)-180)
@@ -1347,7 +1396,7 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
         g=make(order)
         try:
             if nx.is_eulerian(g):
-                trail=list(nx.eulerian_circuit(g,source=local_entry,keys=True));trail_start=local_entry
+                trail=euler_circuit_avoid_reverse(g,local_entry,seed=len(order)*31);trail_start=local_entry
             elif nx.has_eulerian_path(g):
                 trail=list(nx.eulerian_path(g,keys=True));trail_start=trail[0][0] if trail else local_entry
             else:
@@ -1377,7 +1426,7 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                         bg.add_edge(x,y,key=("balance",token,len(bg.edges),pi),**dd)
                     deficit.pop(di);surplus.pop(si)
                 if deficit or surplus or not nx.is_eulerian(bg):continue
-                g=bg;trail=list(nx.eulerian_circuit(g,source=local_entry,keys=True));trail_start=local_entry
+                g=bg;trail=euler_circuit_avoid_reverse(g,local_entry,seed=len(order)*31);trail_start=local_entry
         except Exception:continue
         sc=score(trail,g);sc=(sc[0],sc[1],_dist_m(local_entry,trail_start),sc[2])
         if best is None or sc<best[0]:best=(sc,trail,g,trail_start)
@@ -1451,7 +1500,7 @@ def _shortest_transfer_path_left_mode(full: nx.MultiGraph, source, targets: set,
 
 
 def _edge_coverage_walk(required: nx.MultiGraph, full: nx.MultiGraph, start, *, component: int = 1):
-    """v1.8.0 HYBRID SIDE-SERVICE + hard small-block completion.
+    """v1.8.1 HYBRID SIDE-SERVICE + hard small-block completion.
 
     Rules:
       * Deliver to houses on the walker's LEFT.
@@ -1701,7 +1750,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
             f"配布対象道路に未巡回区間が残っています（{len(missing_sigs)}区間、約{missing_len:.0f}m）。完成扱いにしません。"
         )
 
-    # v1.8.0 HYBRID SIDE-SERVICE GUARANTEE: every required physical segment must appear in
+    # v1.8.1 HYBRID SIDE-SERVICE GUARANTEE: every required physical segment must appear in
     # both directions among coverage (non-transfer) steps.  One-sided completion is
     # not accepted because it would leave the houses on one side unserved.
     directed_required = set()
@@ -1778,7 +1827,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "side-service-task-block-completion",
         "component_routing": "deferred-opposite-side-service",
-        "routing_strategy_version": "1.8.0",
+        "routing_strategy_version": "1.8.1",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
