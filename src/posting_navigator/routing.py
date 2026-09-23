@@ -1392,8 +1392,19 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
             except Exception:pass
         return (major_reverse,bad_reverse,turns)
     orders=[list(base),list(reversed(base))]
-    rng=random.Random(1800+len(base)*17)
-    for _ in range(min(256,max(64,len(base)*6))):
+    rng=random.Random(1830+len(base)*17)
+    # v1.8.3: candidate ordering used to grow to 258 complete Euler/balancing
+    # solves per block.  On real areas (500+ roads) each solve repeatedly ran
+    # Dijkstra over the full movement graph and could exceed Render's 300 s
+    # worker timeout.  The ordering only affects presentation quality, not
+    # coverage, so keep a small deterministic sample for large blocks.
+    if len(base) <= 24:
+        extra_orders=24
+    elif len(base) <= 80:
+        extra_orders=12
+    else:
+        extra_orders=6
+    for _ in range(extra_orders):
         z=list(base);rng.shuffle(z);orders.append(z)
     best=None
     for order in orders:
@@ -1409,10 +1420,19 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                     dlt=bg.out_degree(n)-bg.in_degree(n)
                     if dlt>0:surplus.extend([n]*dlt)
                     elif dlt<0:deficit.extend([n]*(-dlt))
+                # v1.8.3: movement_graph does not change while balancing.
+                # Cache one Dijkstra result per source instead of recomputing it
+                # once for every deficit/surplus comparison and every loop turn.
+                distance_cache={}
                 while deficit and surplus:
                     best_pair=None
                     for di,a in enumerate(deficit):
-                        try:lengths=nx.single_source_dijkstra_path_length(movement_graph,a,weight="route_cost")
+                        try:
+                            if a not in distance_cache:
+                                distance_cache[a]=nx.single_source_dijkstra_path_length(
+                                    movement_graph,a,weight="route_cost"
+                                )
+                            lengths=distance_cache[a]
                         except Exception:continue
                         for si,b in enumerate(surplus):
                             if b in lengths:
