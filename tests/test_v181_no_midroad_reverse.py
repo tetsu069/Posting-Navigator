@@ -13,3 +13,13 @@ def test_straight_osm_split_is_not_selected_as_foldback_point():
     for x,y in zip(steps,steps[1:]):
         if x['from']==y['to'] and x['to']==y['from']:reversals.append(x['to'])
     assert b not in reversals
+
+def test_straight_split_angle_is_hard_rejected_even_when_block_cut_would_favor_it():
+    # Rectangle with an extra collinear OSM split on the bottom edge.  The split
+    # is not a corner and must never be used as an immediate 180-degree turn.
+    a=(139.0,35.0); b=(139.00025,35.0); c=(139.0005,35.0)
+    d=(139.0005,35.00035); e=(139.0,35.00035)
+    g=nx.MultiGraph(); edge(g,a,b,25); edge(g,b,c,25); edge(g,c,d,40); edge(g,d,e,50); edge(g,e,a,40)
+    steps,_=_side_task_block_circuit(g,a,component=1,movement_graph=g)
+    for x,y in zip(steps,steps[1:]):
+        assert not (x['from']==y['to'] and x['to']==y['from'] and x['to']==b)

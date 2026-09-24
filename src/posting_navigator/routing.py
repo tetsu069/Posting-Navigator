@@ -1376,16 +1376,20 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
         # Lexicographic priorities mirror field use: complete a block, keep a
         # consistent side, avoid U-turns/crossings, then shorten walking.
         def real_corner(node):
-            # Degree-2 OSM nodes may be either a true street corner or merely a
-            # split point on one straight street.  Only the former is a sensible
-            # place to switch to the opposite frontage.
+            # Degree-2 OSM nodes may be either a genuine bend or just an OSM
+            # segmentation point on one straight street.  v1.8.4 accidentally
+            # measured *deviation from 180 degrees* and then treated values near
+            # zero as a corner -- exactly backwards.  That made a perfectly
+            # straight split node eligible for the 1->2 foldback seen in the UI.
+            # Use the FULL in-area movement graph here as well, so a sweep-block
+            # cut cannot manufacture a corner.
             if undeg.get(node,0) != 2:return False
-            nbrs=list(block_graph.neighbors(node))
+            nbrs=list(movement_graph.neighbors(node))
             if len(nbrs)!=2:return False
             b1=_bearing(node,nbrs[0]); b2=_bearing(node,nbrs[1])
-            # straight continuation has ~180deg between rays; a corner is lower.
-            sep=abs(((b2-b1+540)%360)-180)
-            return sep < 145.0
+            diff=abs((b2-b1)%360.0)
+            ray_angle=min(diff,360.0-diff)  # 180=straight, ~90=real corner
+            return 20.0 <= ray_angle <= 160.0
         bad_reverse=0.0; major_reverse=0.0; turns=0.0; prev=None
         for i,(u,v,k) in enumerate(circ):
             d=g.get_edge_data(u,v,k); rev=False
@@ -1403,6 +1407,11 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                     if artificial_cut(u):
                         # HARD RULE: the administrative boundary is not a corner.
                         # Reject the whole candidate rather than merely penalising it.
+                        return (math.inf, math.inf, math.inf)
+                    if undeg.get(u,0) == 2 and not real_corner(u):
+                        # HARD RULE: never reverse at a straight through-node.
+                        # This covers ordinary OSM split points as well as block
+                        # boundaries.  Continue to a real bend/junction/end first.
                         return (math.inf, math.inf, math.inf)
                     if undeg.get(u,0) == 1:
                         bad_reverse += 0.02 * L
