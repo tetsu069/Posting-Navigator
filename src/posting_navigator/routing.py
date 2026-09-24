@@ -263,6 +263,7 @@ def _simplify_degree_two(graph: nx.MultiGraph) -> nx.MultiGraph:
                 "duplicate_cost": float(d1.get("duplicate_cost", d1.get("route_cost", 0))) + float(d2.get("duplicate_cost", d2.get("route_cost", 0))),
                 "highway": highway, "name": name, "osm_id": osm_id,
                 "boundary_near": bool(d1.get("boundary_near") or d2.get("boundary_near")),
+                "artificial_boundary_cut_nodes": tuple(set(d1.get("artificial_boundary_cut_nodes", ())) | set(d2.get("artificial_boundary_cut_nodes", ()))),
                 "required": bool(d1.get("required", True)),
                 "geometry": LineString(coords),
             }
@@ -313,6 +314,20 @@ def build_graph(roads: list[dict]) -> nx.MultiGraph:
                         boundary_service_from, boundary_service_to = v, u
                 except Exception:
                     pass
+            # v1.8.4: identify graph endpoints that exist only because the road
+            # was clipped at the selected-area boundary.  A clipped endpoint can
+            # have degree 1 inside the area, but it is not a real-world dead end.
+            artificial_u = artificial_v = False
+            try:
+                sg = source.get("geometry")
+                sc = list(sg.coords)
+                if sc:
+                    if _dist_m(u, sc[0]) < 1.5: artificial_u = bool(source.get("clipped_start"))
+                    elif _dist_m(u, sc[-1]) < 1.5: artificial_u = bool(source.get("clipped_end"))
+                    if _dist_m(v, sc[0]) < 1.5: artificial_v = bool(source.get("clipped_start"))
+                    elif _dist_m(v, sc[-1]) < 1.5: artificial_v = bool(source.get("clipped_end"))
+            except Exception:
+                pass
             graph.add_edge(
                 u, v,
                 length=length,
@@ -325,6 +340,9 @@ def build_graph(roads: list[dict]) -> nx.MultiGraph:
                 boundary_single_side=bool(source.get("boundary_near", False)),
                 boundary_service_from=boundary_service_from,
                 boundary_service_to=boundary_service_to,
+                artificial_boundary_cut_u=artificial_u,
+                artificial_boundary_cut_v=artificial_v,
+                artificial_boundary_cut_nodes=tuple(x for x,flag in ((u,artificial_u),(v,artificial_v)) if flag),
                 required=bool(source.get("required", True)),
                 geometry=segment,
             )
@@ -1314,6 +1332,13 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
     # small-block subgraph degree. A block cut can make the middle of a perfectly
     # continuous street look like degree 1 and used to create the false 1->2 U-turn.
     undeg=dict(movement_graph.degree())
+    def artificial_cut(node):
+        # Boundary clipping can manufacture a degree-1 node in the in-area graph.
+        # Never confuse that with a genuine cul-de-sac turnaround point.
+        for a,b,k,d in movement_graph.edges(node,keys=True,data=True):
+            if node in set(d.get("artificial_boundary_cut_nodes", ())):
+                return True
+        return False
     local_entry=entry if entry in block_graph else min(block_graph.nodes,key=lambda n:_dist_m(entry,n))
     def make(order):
         g=nx.MultiDiGraph()
@@ -1375,6 +1400,10 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                     # is allowed only at a genuine degree-1 dead end.  Everywhere
                     # else it receives a dominant penalty, so the route continues
                     # to the next junction / around the block first.
+                    if artificial_cut(u):
+                        # HARD RULE: the administrative boundary is not a corner.
+                        # Reject the whole candidate rather than merely penalising it.
+                        return (math.inf, math.inf, math.inf)
                     if undeg.get(u,0) == 1:
                         bad_reverse += 0.02 * L
                     elif real_corner(u):

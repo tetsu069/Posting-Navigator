@@ -555,6 +555,16 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
                 except Exception:
                     boundary_inside_left = None
 
+            # v1.8.4: remember endpoints created only by clipping the OSM way at
+            # the selected-area boundary.  They are NOT real dead ends / corners
+            # and routing must never use them as a place to U-turn.
+            try:
+                gc = list(geom_m.coords); oc = list(line_m.coords)
+                tol = 0.75
+                clipped_start = min(Point(gc[0]).distance(Point(oc[0])), Point(gc[0]).distance(Point(oc[-1]))) > tol
+                clipped_end = min(Point(gc[-1]).distance(Point(oc[0])), Point(gc[-1]).distance(Point(oc[-1]))) > tol
+            except Exception:
+                clipped_start = clipped_end = False
             geom = transform(inv, geom_m)
             roads.append({
                 "id": element.get("id"), "highway": highway, "name": tags.get("name", ""),
@@ -562,6 +572,7 @@ def osm_json_to_lines(data: dict, boundary: Polygon) -> list[dict]:
                 "foot": tags.get("foot", ""), "boundary_near": boundary_near,
                 "boundary_inside_left": boundary_inside_left,
                 "boundary_clip_tail": boundary_clip_tail, "required": required,
+                "clipped_start": clipped_start, "clipped_end": clipped_end,
                 "geometry": geom, "_geom_m": geom_m,
             })
     _suppress_divided_major_centerlines(roads)
