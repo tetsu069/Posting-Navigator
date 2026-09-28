@@ -1140,7 +1140,12 @@ def _raw_navigation_legs(steps: list[dict]) -> list[dict]:
         same_kind = step.get("transfer", False) == current["transfer"] and step.get("duplicated", False) == current["duplicated"]
         same_name = bool(step.get("name")) and bool(current.get("name")) and step.get("name") == current.get("name")
         contiguous = _dist_m(current["coords"][-1], coords[0]) <= 1.5
-        can_merge = (not step.get("component_break_before", False)) and contiguous and same_kind and ((same_name and diff < 60) or diff < 25) and current["length_m"] < 280
+        # v1.8.6: navigation numbers represent real decisions, not OSM edge
+        # fragments. Keep travelling straight as one instruction even if an
+        # internal service/positioning flag changes at an invisible split point.
+        # A new number is created at a real turn/junction decision instead.
+        straight_through = diff < 25
+        can_merge = (not step.get("component_break_before", False)) and contiguous and (((same_kind and same_name) and diff < 60) or straight_through) and current["length_m"] < 420
         if can_merge:
             current["coords"].extend(coords[1:])
             current["end_seq"] = step["seq"]
@@ -1395,6 +1400,32 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
             d=g.get_edge_data(u,v,k); rev=False
             if i:
                 pu,pv,pk=circ[i-1]; rev=(pu==v and pv==u)
+                # v1.8.6: detect a U-turn by actual travel bearings, not only by
+                # exact reversed node IDs. OSM/boundary/block splitting can give
+                # the outbound and inbound pieces different node/key identities,
+                # which let the visible 1->2 hairpin escape the old test.
+                try:
+                    pd=g.get_edge_data(pu,pv,pk)
+                    pg=_oriented_edge_geometry(pu,pv,pd)
+                    cg=_oriented_edge_geometry(u,v,d)
+                    pcoords=list(pg.coords); ccoords=list(cg.coords)
+                    arrive=_bearing_over_distance(pcoords,from_start=False)
+                    depart=_bearing_over_distance(ccoords,from_start=True)
+                    delta=abs(((depart-arrive+540)%360)-180)
+                    geometric_uturn = delta >= 155.0
+                except Exception:
+                    geometric_uturn = rev
+                if geometric_uturn:
+                    turn_node=u
+                    # Only a genuine physical dead-end may reverse in the middle
+                    # of a street. A straight degree-2 split, block cut, boundary
+                    # cut, or same-street segmentation is a hard rejection.
+                    if artificial_cut(turn_node):
+                        return (math.inf, math.inf, math.inf)
+                    if undeg.get(turn_node,0) == 2 and not real_corner(turn_node):
+                        return (math.inf, math.inf, math.inf)
+                    if undeg.get(turn_node,0) > 1 and not real_corner(turn_node):
+                        return (math.inf, math.inf, math.inf)
                 if rev:
                     mode=str(d.get("service_mode") or "")
                     L=float(d.get("length",0.0))
