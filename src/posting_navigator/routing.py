@@ -1173,7 +1173,8 @@ def _coalesce_micro_legs(legs: list[dict], threshold_m: float = 7.0) -> list[dic
     i = 0
     while i < len(legs):
         leg = legs[i]
-        if leg["length_m"] < threshold_m and not leg["transfer"] and not leg.get("component_break_before", False):
+        micro_limit = 12.0 if i == 0 else threshold_m
+        if leg["length_m"] < micro_limit and not leg.get("component_break_before", False):
             # 次区間へ吸収するのを優先。開始直後の「左折1m→折返し1m」を消す。
             if i + 1 < len(legs) and not legs[i+1]["transfer"] and not legs[i+1].get("component_break_before", False) and _dist_m(leg["coords"][-1], legs[i+1]["coords"][0]) <= 1.5:
                 nxt = dict(legs[i+1])
@@ -1473,6 +1474,36 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                 if prev is not None and not (rev and undeg.get(u,0)==1):turns+=abs(((br-prev+540)%360)-180)
                 prev=br
             except Exception:pass
+        # v1.9.2: catch the pattern that survived the immediate-reverse checks:
+        # go a few metres/one short connector, then come back along the same
+        # corridor (the visible 4->5 / 6->7 / 8->9 hairpins).  If the turnaround
+        # is not a true dead-end, reject the candidate outright.
+        for i in range(len(circ)-2):
+            u0,v0,k0=circ[i]
+            d0=g.get_edge_data(u0,v0,k0) or {}
+            try:
+                g0=_oriented_edge_geometry(u0,v0,d0)
+                b0=_bearing_over_distance(list(g0.coords),from_start=True)
+            except Exception:
+                continue
+            travelled=0.0
+            for j in range(i+1,min(len(circ),i+4)):
+                uj,vj,kj=circ[j]
+                dj=g.get_edge_data(uj,vj,kj) or {}
+                travelled += float(dj.get("length",0.0))
+                if travelled > 70.0:
+                    break
+                try:
+                    gj=_oriented_edge_geometry(uj,vj,dj)
+                    bj=_bearing_over_distance(list(gj.coords),from_start=True)
+                    opp=abs(((bj-b0+540)%360)-180) >= 155.0
+                    same_corridor=min(_dist_m(u0,vj),_dist_m(v0,uj),_dist_m(u0,uj),_dist_m(v0,vj)) < 18.0
+                except Exception:
+                    continue
+                if opp and same_corridor:
+                    turn_node=uj
+                    if undeg.get(turn_node,0) != 1 and not artificial_cut(turn_node):
+                        bad_reverse += 2000000.0 + travelled * 2000.0
         return (major_reverse,bad_reverse,turns)
     orders=[list(base),list(reversed(base))]
     rng=random.Random(1830+len(base)*17)
@@ -1824,7 +1855,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "side-service-task-block-completion",
         "component_routing": "deferred-opposite-side-service",
-        "routing_strategy_version": "1.8.7",
+        "routing_strategy_version": "1.9.2",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }

@@ -97,6 +97,7 @@ function renderGeneratedMap(){
   clearRouteLayers();
   const steps=routeStepFeatures(), legs=navigationLegFeatures();
   state.navLegs=legs;state.activeGuideLeg=0;state.guidePassed=new Set();state.servicePasses=new Map();
+  if(!map.getPane('routeProgressPane')){const pane=map.createPane('routeProgressPane');pane.style.zIndex='675';pane.style.pointerEvents='none'}
   const hasSteps=steps.length>0;
   state.layers.generated=L.geoJSON(state.geojson,{
     filter:f=>{const k=f.properties?.kind;return k!=='navigation_leg' && !(hasSteps&&(k==='route'||k==='worker_route'))},
@@ -104,7 +105,7 @@ function renderGeneratedMap(){
       const k=f.properties?.kind;
       if(k==='area')return state.areaGeojson?{weight:0,opacity:0,fillOpacity:0}:{weight:4,color:'#64748b',opacity:.82,fillColor:'#cbd5e1',fillOpacity:.06};
       if(k==='road')return{weight:1.0,color:'#94a3b8',opacity:.20};
-      if(k==='route_step'){if(f.properties.transfer)return{weight:3,color:'#64748b',opacity:.45,dashArray:'8 8'};if(f.properties.duplicated)return{weight:4,color:'#f59e0b',opacity:.58};return{weight:4,color:'#ef4444',opacity:.50}}
+      if(k==='route_step'){if(f.properties.transfer)return{weight:3,color:'#64748b',opacity:.45,dashArray:'8 8'};if(f.properties.duplicated)return{weight:4,color:'#f59e0b',opacity:.58};return{weight:4,color:'#ef4444',opacity:.38}}
       return{weight:2,color:'#64748b'}
     }
   }).addTo(map);
@@ -160,9 +161,10 @@ function drawGuideProgress(){
     // Draw the physical road once. Blue = one serviced direction, green = both
     // directions (or a one-side-only boundary/narrow road) complete.
     const geom=rec.segments.values().next().value;if(!geom)continue;
-    L.geoJSON({type:'Feature',properties:{},geometry:geom},{style:{color:rec.complete?'#22c55e':'#2563eb',weight:rec.complete?10:9,opacity:1,lineCap:'round',lineJoin:'round'}}).addTo(g);
+    L.geoJSON({type:'Feature',properties:{},geometry:geom},{pane:'routeProgressPane',style:{color:rec.complete?'#16a34a':'#2563eb',weight:rec.complete?11:10,opacity:1,lineCap:'round',lineJoin:'round'}}).addTo(g);
   }
-  state.layers.guideProgress=g.addTo(map);g.bringToFront?.();
+  state.layers.guideProgress=g.addTo(map);
+  document.querySelectorAll('.guide-item').forEach((el,i)=>el.classList.toggle('passed',state.guidePassed.has(i)));
 }
 function markGuideLegPassed(index){
   if(index<0||index>=state.navLegs.length)return;
@@ -189,8 +191,9 @@ function renderRouteGuide(legs){
   const box=$('routeGuide');if(!box)return;if(!legs?.length){box.classList.add('hidden');return}
   box.innerHTML=`<h3>開始地点からの最適巡回順</h3><div class="hint">上から1→2→3…の順に進みます。項目をクリックすると、その区間だけ地図上で青く強調します。</div><div class="guide-controller"><button id="guidePrev" class="secondary">← 前へ</button><div><strong id="guideCounter">1 / ${legs.length}</strong><div id="guideCurrent" class="guide-current"></div></div><button id="guideNext" class="secondary">次へ →</button></div><div class="guide-list">${legs.map((f,i)=>`<button class="guide-item" data-index="${i}"><div class="guide-num">${f.properties.leg}</div><div><b>${escapeHtml(f.properties.turn||'進む')} ・ ${Math.round(f.properties.length_m||0)}m</b><span>${escapeHtml(f.properties.component_break_before?(f.properties.instruction||'次の道路群へ移動'): (f.properties.name||f.properties.instruction||'道路に沿って進む'))}</span></div></button>`).join('')}</div>`;
   box.classList.remove('hidden');
-  box.querySelectorAll('.guide-item').forEach(el=>el.onclick=()=>focusGuideLeg(+el.dataset.index,true));
-  $('guidePrev').onclick=()=>focusGuideLeg(state.activeGuideLeg-1,true);$('guideNext').onclick=()=>{markGuideLegPassed(state.activeGuideLeg);focusGuideLeg(state.activeGuideLeg+1,true)};
+  const moveGuideTo=(target)=>{target=Math.max(0,Math.min(state.navLegs.length-1,target));if(target>state.activeGuideLeg){for(let i=state.activeGuideLeg;i<target;i++)markGuideLegPassed(i)}focusGuideLeg(target,true)};
+  box.querySelectorAll('.guide-item').forEach(el=>el.onclick=()=>moveGuideTo(+el.dataset.index));
+  $('guidePrev').onclick=()=>focusGuideLeg(state.activeGuideLeg-1,true);$('guideNext').onclick=()=>moveGuideTo(state.activeGuideLeg+1);
   focusGuideLeg(0,false);
 }
 function distanceToFeatureMeters(lat,lon,f){let best=Infinity,c=f?.geometry?.coordinates||[];for(let j=0;j<c.length-1;j++)best=Math.min(best,pointSegmentMeters(lat,lon,c[j][1],c[j][0],c[j+1][1],c[j+1][0]));return best}

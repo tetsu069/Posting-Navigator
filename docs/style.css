@@ -52,3 +52,7 @@
 #osmCacheStatus.server{background:#dbeafe;color:#1d4ed8}
 #osmCacheStatus.refreshing{background:#fef3c7;color:#92400e}
 .osm-cache-box button{width:100%;margin-bottom:5px}
+
+/* v1.9.1: PC guide progress */
+.guide-item.passed{border-color:#93c5fd;background:#eff6ff}
+.guide-item.passed .guide-num{background:#2563eb;color:#fff}
