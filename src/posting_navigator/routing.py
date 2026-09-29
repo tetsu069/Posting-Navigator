@@ -1365,11 +1365,19 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                 if e in used:continue
                 _,v,k=e
                 reverse=(prev is not None and v==prev)
-                # true dead ends may reverse; otherwise consume a continuation first
-                # v1.8.7: immediate reverse at any non-dead-end is last resort.
-                # Corners/junctions must continue around the block instead of
-                # flipping to the opposite frontage just because it is available.
-                pri=(1000000 if reverse and undeg.get(u,0)!=1 else 0, rng.random())
+                # v1.8.8: keep working in the current local sweep block when
+                # possible, but do not make block completion a hard wall.  The
+                # old hard wall forced opposite-side tasks into immediate
+                # out-and-back hairpins.
+                current_bid = None
+                if edge_stack:
+                    eu,ev,ek=edge_stack[-1]
+                    ed=g.get_edge_data(eu,ev,ek) or {}
+                    current_bid=ed.get("sweep_block")
+                nd=g.get_edge_data(u,v,k) or {}
+                block_switch = current_bid is not None and nd.get("sweep_block") != current_bid
+                pri=(1000000 if reverse and undeg.get(u,0)!=1 else 0,
+                     1000 if block_switch else 0, rng.random())
                 choices.append((pri,e))
             if choices:
                 _,e=min(choices,key=lambda x:x[0]); _,v,k=e; used.add(e)
@@ -1599,125 +1607,15 @@ def _shortest_transfer_path_left_mode(full: nx.MultiGraph, source, targets: set,
 
 
 def _edge_coverage_walk(required: nx.MultiGraph, full: nx.MultiGraph, start, *, component: int = 1):
-    """v1.8.2 HYBRID SIDE-SERVICE + hard small-block completion.
+    """v1.8.8 component-wide side-task circulation.
 
-    Rules:
-      * Deliver to houses on the walker's LEFT.
-      * Each road side is a separate service task; opposite-side service is deferred rather than immediately reversed.
-      * Finish the current small sweep block completely before moving to another.
-      * Inside a connected block-piece, every side-task is served exactly once; normal-junction immediate reversals are avoided.
-      * Inter-block movement uses only real OSM roads and strongly avoids creating
-        a 3rd/4th traversal of already covered roads.
+    Opposite-side tasks are no longer forced to finish inside an artificial
+    105m sweep cell. That hard cell boundary was the root cause of repeated
+    out-and-back hairpins. The full connected component is solved as one
+    circulation; sweep_block remains metadata for local preference/display.
     """
-    current = start
-    steps: list[dict] = []
-    used_pairs: set = set()
-
-    # Build deterministic block order metadata, but choose the next block by
-    # real-road proximity from the current position.
-    # Direct callers/tests may supply a graph before sweep-block assignment.
-    # Treat it as one small block rather than failing on bid=None.
-    if all(d.get("sweep_block") is None for _, _, _, d in required.edges(keys=True, data=True)):
-        for _, _, _, d in required.edges(keys=True, data=True):
-            d["sweep_block"] = (0, 0)
-            d["sweep_rank"] = 0
-
-    block_rank = {}
-    block_ids = set()
-    for _, _, _, d in required.edges(keys=True, data=True):
-        bid = d.get("sweep_block")
-        block_ids.add(bid)
-        block_rank[bid] = min(block_rank.get(bid, math.inf), float(d.get("sweep_rank", 0.0)))
-
-    unfinished = set(block_ids)
-
-    def block_nodes(bid):
-        nodes = set()
-        for u, v, _, d in required.edges(keys=True, data=True):
-            if d.get("sweep_block") == bid:
-                nodes.update((u, v))
-        return nodes
-
-    def choose_next_block():
-        candidates = []
-        for bid in unfinished:
-            nodes = block_nodes(bid)
-            path = _shortest_transfer_path_left_mode(full, current, nodes, used_pairs)
-            if path is None:
-                continue
-            plen = 0.0
-            for a, b in zip(path, path[1:]):
-                keyed = full.get_edge_data(a, b) or {}
-                if keyed:
-                    plen += min(float(x.get("length", 0.0)) for x in keyed.values())
-            candidates.append((plen, block_rank.get(bid, math.inf), repr(bid), bid, path))
-        if not candidates:
-            return None, None
-        _, _, _, bid, path = min(candidates)
-        return bid, path
-
-    while unfinished:
-        bid, path_to_block = choose_next_block()
-        if bid is None:
-            raise nx.NetworkXNoPath("次の小区画へ実道路上で接続できません")
-
-        # Move to this block only once; after entering it, every connected piece
-        # assigned to the block is completed before another block can be selected.
-        if path_to_block and len(path_to_block) > 1:
-            for a, b in zip(path_to_block, path_to_block[1:]):
-                keyed = full.get_edge_data(a, b) or {}
-                if not keyed:
-                    raise nx.NetworkXNoPath("小区画への移動道路が見つかりません")
-                d = dict(min(keyed.values(), key=lambda x: float(x.get("length", math.inf))))
-                d["duplicated"] = _edge_pair_key(a, b) in used_pairs
-                st = _step(a, b, d, len(steps)+1, transfer=True, component=component)
-                st["left_side_pass"] = False
-                steps.append(st)
-                used_pairs.add(_edge_pair_key(a, b))
-                current = b
-
-        pieces = _block_components(required, bid)
-        remaining_pieces = pieces[:]
-        while remaining_pieces:
-            # Choose the nearest connected piece within the SAME block.
-            best = None
-            for i, piece in enumerate(remaining_pieces):
-                nodes = set(piece.nodes)
-                path = _shortest_transfer_path_left_mode(full, current, nodes, used_pairs)
-                if path is None:
-                    continue
-                plen = 0.0
-                for a, b in zip(path, path[1:]):
-                    keyed = full.get_edge_data(a, b) or {}
-                    if keyed:
-                        plen += min(float(x.get("length", 0.0)) for x in keyed.values())
-                row = (plen, i, path, piece)
-                if best is None or row[0] < best[0]:
-                    best = row
-            if best is None:
-                raise nx.NetworkXNoPath("現在の小区画内に未処理道路が残っています")
-            _, idx, path, piece = best
-            remaining_pieces.pop(idx)
-
-            if path and len(path) > 1:
-                for a, b in zip(path, path[1:]):
-                    keyed = full.get_edge_data(a, b) or {}
-                    d = dict(min(keyed.values(), key=lambda x: float(x.get("length", math.inf))))
-                    d["duplicated"] = _edge_pair_key(a, b) in used_pairs
-                    st = _step(a, b, d, len(steps)+1, transfer=True, component=component)
-                    st["left_side_pass"] = False
-                    steps.append(st)
-                    used_pairs.add(_edge_pair_key(a, b))
-                    current = b
-
-            entry = current if current in piece else min(piece.nodes, key=lambda n: _dist_m(current, n))
-            local_steps, current = _side_task_block_circuit(piece, entry, component=component, seq_start=len(steps)+1, movement_graph=full)
-            for st in local_steps:
-                steps.append(st)
-                used_pairs.add(_edge_pair_key(st["from"], st["to"]))
-
-        unfinished.remove(bid)
-
+    entry = start if start in required else min(required.nodes, key=lambda n:_dist_m(start,n))
+    steps, current = _side_task_block_circuit(required, entry, component=component, seq_start=1, movement_graph=full)
     return steps, current
 
 def generate_route(roads: list[dict], start_point: tuple[float, float] | None = None) -> dict:
