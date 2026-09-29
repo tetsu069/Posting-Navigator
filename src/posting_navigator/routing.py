@@ -1140,7 +1140,7 @@ def _raw_navigation_legs(steps: list[dict]) -> list[dict]:
         same_kind = step.get("transfer", False) == current["transfer"] and step.get("duplicated", False) == current["duplicated"]
         same_name = bool(step.get("name")) and bool(current.get("name")) and step.get("name") == current.get("name")
         contiguous = _dist_m(current["coords"][-1], coords[0]) <= 1.5
-        # v1.8.6: navigation numbers represent real decisions, not OSM edge
+        # v1.8.7: navigation numbers represent real decisions, not OSM edge
         # fragments. Keep travelling straight as one instruction even if an
         # internal service/positioning flag changes at an invisible split point.
         # A new number is created at a real turn/junction decision instead.
@@ -1366,7 +1366,10 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                 _,v,k=e
                 reverse=(prev is not None and v==prev)
                 # true dead ends may reverse; otherwise consume a continuation first
-                pri=(1 if reverse and undeg.get(u,0)!=1 else 0, rng.random())
+                # v1.8.7: immediate reverse at any non-dead-end is last resort.
+                # Corners/junctions must continue around the block instead of
+                # flipping to the opposite frontage just because it is available.
+                pri=(1000000 if reverse and undeg.get(u,0)!=1 else 0, rng.random())
                 choices.append((pri,e))
             if choices:
                 _,e=min(choices,key=lambda x:x[0]); _,v,k=e; used.add(e)
@@ -1400,7 +1403,7 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
             d=g.get_edge_data(u,v,k); rev=False
             if i:
                 pu,pv,pk=circ[i-1]; rev=(pu==v and pv==u)
-                # v1.8.6: detect a U-turn by actual travel bearings, not only by
+                # v1.8.7: detect a U-turn by actual travel bearings, not only by
                 # exact reversed node IDs. OSM/boundary/block splitting can give
                 # the outbound and inbound pieces different node/key identities,
                 # which let the visible 1->2 hairpin escape the old test.
@@ -1447,9 +1450,12 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                     if undeg.get(u,0) == 1:
                         bad_reverse += 0.02 * L
                     elif real_corner(u):
-                        # A genuine bend/corner is acceptable when a side switch
-                        # is unavoidable; a straight degree-2 split is not.
-                        bad_reverse += 2.0 * L
+                        # v1.8.7: a corner is a place where we *can* turn, not a
+                        # reason to reverse immediately.  Opposite-side service
+                        # should be deferred around the block.  Give corner U-turns
+                        # the same dominant cost as other non-dead-end reversals so
+                        # the solver uses them only when topology truly forces one.
+                        bad_reverse += 500000.0 + 500.0 * L
                     elif mode == "major-defer-opposite":
                         major_reverse += 1000000.0 + 1000.0*L
                     else:
@@ -1920,7 +1926,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "side-service-task-block-completion",
         "component_routing": "deferred-opposite-side-service",
-        "routing_strategy_version": "1.8.1",
+        "routing_strategy_version": "1.8.7",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
