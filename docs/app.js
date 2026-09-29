@@ -132,11 +132,44 @@ function arrowMarkersForLeg(feature){
   const {total}=lineLengths(c);const ds=total<35?[total*.5]:total<90?[total*.35,total*.72]:[total*.22,total*.50,total*.78];
   ds.forEach(d=>{const m=tangentAtDistance(c,d);if(!m?.pt)return;L.marker([m.pt[1],m.pt[0]],{interactive:false,icon:L.divIcon({className:'route-arrow-wrap',html:`<div class="route-arrow selected" style="transform:rotate(${m.bearing}deg)">${arrowSvg()}</div>`,iconSize:[30,30],iconAnchor:[15,15]})}).addTo(g)});return g;
 }
-function serviceRoadIdentity(f){const c=f?.geometry?.coordinates||[];if(c.length<2)return null;const a=c[0],b=c[c.length-1],q=p=>`${p[0].toFixed(6)},${p[1].toFixed(6)}`,qa=q(a),qb=q(b);return{key:[qa,qb].sort().join('|'),dir:qa<=qb?'f':'r'}}
+function atomicServiceSegments(f){
+  const c=f?.geometry?.coordinates||[], out=[];
+  const q=p=>`${(+p[0]).toFixed(6)},${(+p[1]).toFixed(6)}`;
+  for(let i=0;i<c.length-1;i++){
+    const a=c[i],b=c[i+1],qa=q(a),qb=q(b);
+    if(qa===qb)continue;
+    out.push({key:[qa,qb].sort().join('|'),dir:qa<=qb?'f':'r',geometry:{type:'LineString',coordinates:[a,b]}});
+  }
+  return out;
+}
 function routeStepsForGuideLeg(f){const p=f?.properties||{},a=Number(p.start_seq),b=Number(p.end_seq);if(!Number.isFinite(a)||!Number.isFinite(b))return[];return routeStepFeatures().filter(s=>{const q=Number(s.properties?.seq);return q>=Math.min(a,b)&&q<=Math.max(a,b)&&!s.properties?.transfer})}
-function recordServiceStep(f){const id=serviceRoadIdentity(f);if(!id)return;const p=f.properties||{},rec=state.servicePasses.get(id.key)||{dirs:new Set(),features:[],complete:false};rec.dirs.add(id.dir);rec.features.push(f);if(p.boundary_one_side_service||p.both_sides_single_pass||p.service_mode==='boundary-one-side'||p.service_mode==='narrow-both-sides')rec.complete=true;else if(rec.dirs.size>=2)rec.complete=true;state.servicePasses.set(id.key,rec)}
-function drawGuideProgress(){if(state.layers.guideProgress)state.layers.guideProgress.remove();const g=L.layerGroup();for(const rec of state.servicePasses.values()){for(const f of rec.features){L.geoJSON(f,{style:{color:rec.complete?'#22c55e':'#2563eb',weight:rec.complete?9:8,opacity:.96,lineCap:'round',lineJoin:'round'}}).addTo(g)}}state.layers.guideProgress=g.addTo(map)}
-function markGuideLegPassed(index){if(index<0||index>=state.navLegs.length)return;state.guidePassed.add(index);const leg=state.navLegs[index];for(const step of routeStepsForGuideLeg(leg))recordServiceStep(step);drawGuideProgress()}
+function recordServiceStep(f){
+  const p=f?.properties||{};
+  for(const seg of atomicServiceSegments(f)){
+    const rec=state.servicePasses.get(seg.key)||{dirs:new Set(),segments:new Map(),complete:false};
+    rec.dirs.add(seg.dir);rec.segments.set(seg.dir,seg.geometry);
+    if(p.boundary_one_side_service||p.both_sides_single_pass||p.service_mode==='boundary-one-side'||p.service_mode==='narrow-both-sides')rec.complete=true;
+    else if(rec.dirs.size>=2)rec.complete=true;
+    state.servicePasses.set(seg.key,rec);
+  }
+}
+function drawGuideProgress(){
+  if(state.layers.guideProgress)state.layers.guideProgress.remove();
+  const g=L.layerGroup();
+  for(const rec of state.servicePasses.values()){
+    // Draw the physical road once. Blue = one serviced direction, green = both
+    // directions (or a one-side-only boundary/narrow road) complete.
+    const geom=rec.segments.values().next().value;if(!geom)continue;
+    L.geoJSON({type:'Feature',properties:{},geometry:geom},{style:{color:rec.complete?'#22c55e':'#2563eb',weight:rec.complete?10:9,opacity:1,lineCap:'round',lineJoin:'round'}}).addTo(g);
+  }
+  state.layers.guideProgress=g.addTo(map);g.bringToFront?.();
+}
+function markGuideLegPassed(index){
+  if(index<0||index>=state.navLegs.length)return;
+  state.guidePassed.add(index);const leg=state.navLegs[index];const steps=routeStepsForGuideLeg(leg);
+  if(steps.length){for(const step of steps)recordServiceStep(step)}else if(!leg.properties?.transfer){recordServiceStep(leg)}
+  drawGuideProgress();
+}
 function focusGuideLeg(index,fit=true){
   if(!state.navLegs?.length)return;index=Math.max(0,Math.min(state.navLegs.length-1,index));state.activeGuideLeg=index;
   if(state.layers.focus)state.layers.focus.remove();if(state.layers.directions)state.layers.directions.remove();if(state.layers.nextPreview)state.layers.nextPreview.remove();
@@ -199,7 +232,7 @@ async function loadMyProjects(){if(!state.user)return;try{const j=await api('/ap
 function setupGoogleLogin(){const cid=state.config.google_client_id;if(!cid){$('loginBox').innerHTML='<span class="hint">Googleログイン未設定</span>';return}const s=document.createElement('script');s.src='https://accounts.google.com/gsi/client';s.async=true;s.onload=()=>{google.accounts.id.initialize({client_id:cid,callback:async r=>{try{const j=await api('/api/auth/google',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({credential:r.credential})});state.sessionToken=j.token;state.user=j.user;localStorage.setItem('pn_session',j.token);renderLogin();loadMyProjects()}catch(e){alert(e.message)}}});renderLogin()};document.head.appendChild(s)}
 function renderLogin(){if(state.user){$('loginBox').innerHTML=`<button id="logout" class="ghost">${escapeHtml(state.user.name||state.user.email)} ▾</button>`;$('logout').onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'})}catch{}state.sessionToken='';state.user=null;localStorage.removeItem('pn_session');$('myProjectsBox').classList.add('hidden');renderLogin()}}else if(window.google){$('loginBox').innerHTML='<div id="googleBtn"></div>';google.accounts.id.renderButton($('googleBtn'),{theme:'outline',size:'medium',text:'signin_with',shape:'pill'})}}
 
-let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('service-worker.js').catch(console.warn));
+let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.0',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
 
 function haversine(lat1,lon1,lat2,lon2){const R=6371000,p=Math.PI/180,dLat=(lat2-lat1)*p,dLon=(lon2-lon1)*p,a=Math.sin(dLat/2)**2+Math.cos(lat1*p)*Math.cos(lat2*p)*Math.sin(dLon/2)**2;return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))}
 function pointSegmentMeters(lat,lon,lat1,lon1,lat2,lon2){const mLat=(lat+lat1+lat2)/3*Math.PI/180,x=(v)=>v*Math.PI/180*6371000*Math.cos(mLat),y=(v)=>v*Math.PI/180*6371000;const px=x(lon),py=y(lat),ax=x(lon1),ay=y(lat1),bx=x(lon2),by=y(lat2),dx=bx-ax,dy=by-ay;const t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/(dx*dx+dy*dy||1)));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy))}
