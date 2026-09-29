@@ -1365,7 +1365,7 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                 if e in used:continue
                 _,v,k=e
                 reverse=(prev is not None and v==prev)
-                # v1.8.8: keep working in the current local sweep block when
+                # v1.8.9: keep working in the current local sweep block when
                 # possible, but do not make block completion a hard wall.  The
                 # old hard wall forced opposite-side tasks into immediate
                 # out-and-back hairpins.
@@ -1607,7 +1607,7 @@ def _shortest_transfer_path_left_mode(full: nx.MultiGraph, source, targets: set,
 
 
 def _edge_coverage_walk(required: nx.MultiGraph, full: nx.MultiGraph, start, *, component: int = 1):
-    """v1.8.8 component-wide side-task circulation.
+    """v1.8.9 component-wide side-task circulation.
 
     Opposite-side tasks are no longer forced to finish inside an artificial
     105m sweep cell. That hard cell boundary was the root cause of repeated
