@@ -1423,7 +1423,7 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                     pcoords=list(pg.coords); ccoords=list(cg.coords)
                     arrive=_bearing_over_distance(pcoords,from_start=False)
                     depart=_bearing_over_distance(ccoords,from_start=True)
-                    delta=abs(((depart-arrive+540)%360)-180)
+                    delta=abs(((depart-arrive+180)%360)-180)
                     geometric_uturn = delta >= 155.0
                 except Exception:
                     geometric_uturn = rev
@@ -1474,7 +1474,7 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                 if prev is not None and not (rev and undeg.get(u,0)==1):turns+=abs(((br-prev+540)%360)-180)
                 prev=br
             except Exception:pass
-        # v1.9.2: catch the pattern that survived the immediate-reverse checks:
+        # v1.9.4: catch the pattern that survived the immediate-reverse checks:
         # go a few metres/one short connector, then come back along the same
         # corridor (the visible 4->5 / 6->7 / 8->9 hairpins).  If the turnaround
         # is not a true dead-end, reject the candidate outright.
@@ -1496,7 +1496,7 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                 try:
                     gj=_oriented_edge_geometry(uj,vj,dj)
                     bj=_bearing_over_distance(list(gj.coords),from_start=True)
-                    opp=abs(((bj-b0+540)%360)-180) >= 155.0
+                    opp=abs(((bj-b0+180)%360)-180) >= 155.0
                     same_corridor=min(_dist_m(u0,vj),_dist_m(v0,uj),_dist_m(u0,uj),_dist_m(v0,vj)) < 18.0
                 except Exception:
                     continue
@@ -1855,7 +1855,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "side-service-task-block-completion",
         "component_routing": "deferred-opposite-side-service",
-        "routing_strategy_version": "1.9.2",
+        "routing_strategy_version": "1.9.4",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
