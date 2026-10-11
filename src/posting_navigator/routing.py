@@ -1474,7 +1474,7 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                 if prev is not None and not (rev and undeg.get(u,0)==1):turns+=abs(((br-prev+540)%360)-180)
                 prev=br
             except Exception:pass
-        # v1.9.6: catch the pattern that survived the immediate-reverse checks:
+        # v1.9.7: catch the pattern that survived the immediate-reverse checks:
         # go a few metres/one short connector, then come back along the same
         # corridor (the visible 4->5 / 6->7 / 8->9 hairpins).  If the turnaround
         # is not a true dead-end, reject the candidate outright.
@@ -1855,7 +1855,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "side-service-task-block-completion",
         "component_routing": "deferred-opposite-side-service",
-        "routing_strategy_version": "1.9.6",
+        "routing_strategy_version": "1.9.7",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
