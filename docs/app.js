@@ -20,7 +20,7 @@ async function reuploadSavedKmz(blob,generation){
   if(!blob || generation!==state.kmzUploadGeneration)return;
   try{
     const fd=new FormData();fd.append('kmz',blob,'restored.kmz');
-    const r=await fetch(`${API}/api/areas`,{method:'POST',body:fd,headers:authHeaders()});
+    const r=await fetch(`${API}/api/areas`,{method:'POST',body:fd});
     const j=await r.json();
     if(!r.ok)throw Error(j.error||`HTTP ${r.status}`);
     if(generation!==state.kmzUploadGeneration)return;
@@ -63,7 +63,7 @@ map.on('click',e=>{
 $('pickStart').onclick=()=>setStartPickMode(!state.startPickMode);
 $('useCurrent').onclick=()=>navigator.geolocation?.getCurrentPosition(p=>{const {latitude,longitude}=p.coords;setStartPoint(latitude,longitude,{center:true})},e=>status('status',`現在地を取得できません: ${e.message}`,'error'),{enableHighAccuracy:true});
 
-$('kmz').onchange=async()=>{const f=$('kmz').files[0];if(!f)return;const generation=++state.kmzUploadGeneration;state.kmzBlob=f;status('status','KMZを解析中…');$('area').disabled=true;$('build').disabled=true;const fd=new FormData();fd.append('kmz',f);try{const r=await fetch(`${API}/api/areas`,{method:'POST',body:fd,headers:authHeaders()});const j=await r.json();if(!r.ok)throw Error(j.error||`HTTP ${r.status}`);if(generation!==state.kmzUploadGeneration)return;state.uploadId=j.upload_id;state.areaGeojson=j.area_geojson||null;state.areaInfo=j.area_info||{};if(!Array.isArray(j.areas)||!j.areas.length)throw Error('KMZに選択可能な町丁目がありません');$('area').innerHTML=j.areas.map(x=>`<option>${escapeHtml(x)}</option>`).join('');$('area').disabled=false;$('build').disabled=false;$('refreshOsm').disabled=false;status('status',`${j.areas.length}件の区画を読み込みました。②から選択できます。`,'success');saveFieldSessionSoon();try{renderAreaBoundaries(true);renderHouseholdInfo()}catch(drawError){console.error('区画描画エラー:',drawError);status('status',`${j.areas.length}件の町丁目を読み込みました。境界描画のみ失敗: ${drawError.message}`,'error')}updateOsmCacheStatus()}catch(e){if(generation===state.kmzUploadGeneration){console.error('KMZ読み込み失敗:',e);status('status',`KMZ読み込み失敗: ${e.message}`,'error')}}};
+$('kmz').onchange=async()=>{const f=$('kmz').files[0];if(!f)return;const generation=++state.kmzUploadGeneration;status('status','KMZを解析中…');$('area').disabled=true;$('build').disabled=true;const fd=new FormData();fd.append('kmz',f);try{const r=await fetch(`${API}/api/areas`,{method:'POST',body:fd});const j=await r.json();if(!r.ok)throw Error(j.error||`HTTP ${r.status}`);if(generation!==state.kmzUploadGeneration)return;state.kmzBlob=f;state.uploadId=j.upload_id;state.areaGeojson=j.area_geojson||null;state.areaInfo=j.area_info||{};if(!Array.isArray(j.areas)||!j.areas.length)throw Error('KMZに選択可能な町丁目がありません');$('area').innerHTML=j.areas.map(x=>`<option>${escapeHtml(x)}</option>`).join('');$('area').disabled=false;$('build').disabled=false;$('refreshOsm').disabled=false;status('status',`${j.areas.length}件の区画を読み込みました。②から選択できます。`,'success');saveFieldSessionSoon();try{renderAreaBoundaries(true);renderHouseholdInfo()}catch(drawError){console.error('区画描画エラー:',drawError);status('status',`${j.areas.length}件の町丁目を読み込みました。境界描画のみ失敗: ${drawError.message}`,'error')}updateOsmCacheStatus()}catch(e){if(generation===state.kmzUploadGeneration){console.error('KMZ読み込み失敗:',e);status('status',`KMZ読み込み失敗: ${e.message}${e instanceof TypeError?'（通信エラー。APIへのアップロードがブロックされた可能性があります）':''}`,'error')}}};
 
 
 $('area').onchange=()=>{renderAreaBoundaries(true);renderHouseholdInfo();updateOsmCacheStatus();saveFieldSessionSoon()};
