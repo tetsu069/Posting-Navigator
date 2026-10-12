@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import hashlib
 import os
 import secrets
@@ -249,7 +250,19 @@ def api_areas():
     except Exception as exc:
         path.unlink(missing_ok=True)
         return jsonify(error=f"KMZを解析できません: {exc}"), 400
+    if request.args.get("compact") == "1":
+        return jsonify(upload_id=upload_id, areas=areas)
     return jsonify(upload_id=upload_id, areas=areas, area_geojson=area_geojson, area_info=area_info)
+
+
+@app.get("/api/areas/<upload_id>/details")
+def api_area_details(upload_id):
+    if not re.fullmatch(r"[0-9a-f]{32}", upload_id):
+        return jsonify(error="Invalid upload ID"), 400
+    path = UPLOADS / f"{upload_id}.kmz"
+    if not path.is_file():
+        return jsonify(error="KMZ upload expired"), 404
+    return jsonify(area_geojson=list_area_geojson_from_kmz(path), area_info=list_area_info_from_kmz(path))
 
 
 @app.post("/api/build")

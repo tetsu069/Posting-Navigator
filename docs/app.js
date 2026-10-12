@@ -56,7 +56,7 @@ $('kmz').onchange=async()=>{
   const fd=new FormData();fd.append('kmz',f);
   try{
     // Original v1.9.3 upload flow; no automatic upload runs alongside this request.
-    const started=Date.now();const r=await fetch(`${API}/api/areas`,{method:'POST',body:fd,cache:'no-store',mode:'cors'});
+    const started=Date.now();const r=await fetch(`${API}/api/areas?compact=1`,{method:'POST',body:fd,cache:'no-store',mode:'cors'});
     const raw=await r.text();let j;
     try{j=JSON.parse(raw)}catch{throw Error(`API HTTP ${r.status}: ${raw.slice(0,160)}`)}
     if(!r.ok)throw Error(j.error||`HTTP ${r.status}`);
@@ -72,6 +72,8 @@ $('kmz').onchange=async()=>{
     saveFieldSessionSoon();
     try{renderAreaBoundaries(true);renderHouseholdInfo()}catch(err){console.error('境界描画失敗',err)}
     updateOsmCacheStatus();
+    // Large polygon payload is loaded separately; the dropdown is usable immediately.
+    fetch(`${API}/api/areas/${encodeURIComponent(state.uploadId)}/details`,{cache:'no-store'}).then(r=>{if(!r.ok)throw Error(`HTTP ${r.status}`);return r.json()}).then(details=>{if(generation!==state.kmzUploadGeneration)return;state.areaGeojson=details.area_geojson||null;state.areaInfo=details.area_info||{};renderAreaBoundaries(true);renderHouseholdInfo();saveFieldSessionSoon()}).catch(err=>console.warn('境界データの追加取得に失敗（町丁目選択は利用可能）',err));
   }catch(e){
     if(generation!==state.kmzUploadGeneration)return;
     console.error('KMZアップロード',e,'API:',API,'origin:',location.origin);
@@ -283,4 +285,4 @@ $('showNumbers')?.addEventListener('change',()=>state.navLegs?.length&&focusGuid
 
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
 
-(async()=>{try{await restoreFieldSession()}catch(e){state.restoring=false;console.warn('復元失敗',e)}await loadConfig()})();
+(async()=>{await loadConfig()})();
