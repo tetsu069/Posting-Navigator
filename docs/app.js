@@ -31,7 +31,7 @@ async function reuploadSavedKmz(blob,generation){
   }catch(e){if(generation===state.kmzUploadGeneration)console.warn('KMZ自動復元に失敗:',e)}
 }
 function drawGpsTrack(){if(state.layers.gpsTrack)state.layers.gpsTrack.remove();state.layers.gpsTrack=null;if(state.gpsTrack.length<2)return;state.layers.gpsTrack=L.polyline(state.gpsTrack.map(p=>[p.lat,p.lon]),{color:'#7c3aed',weight:6,opacity:.9,lineCap:'round'}).addTo(map);state.layers.gpsTrack.bringToFront?.()}
-async function restoreFieldSession(){const generation=state.kmzUploadGeneration;const x=await sessionGet();if(!x||generation!==state.kmzUploadGeneration)return;state.restoring=true;state.kmzBlob=x.kmzBlob||null;state.geojson=x.geojson||null;state.areaGeojson=x.areaGeojson||null;state.summary=x.summary||null;state.areaInfo=x.areaInfo||{};state.workerId=+x.workerId||1;state.completed=new Set(x.completed||[]);state.fieldGuideLeg=+x.fieldGuideLeg||0;state.activeGuideLeg=+x.activeGuideLeg||0;state.guidePassed=new Set(x.guidePassed||[]);restoreServicePasses(x.servicePasses);state.gpsTrack=Array.isArray(x.gpsTrack)?x.gpsTrack:[];state.gpsTrackingDesired=!!x.gpsTrackingDesired;if(x.startLat&&x.startLon)setStartPoint(+x.startLat,+x.startLon);if(x.areas?.length){$('area').innerHTML=x.areas.map(a=>`<option>${escapeHtml(a)}</option>`).join('');$('area').disabled=false;$('build').disabled=false;$('refreshOsm').disabled=false;if(x.selectedArea)$('area').value=x.selectedArea}if(state.areaGeojson){renderAreaBoundaries(false);renderHouseholdInfo()}if(state.geojson){renderGeneratedMap();renderMetrics();renderDownloads();prepareWorkerUI();loadWorker(state.workerId,{preserveProgress:true});restoreServicePasses(x.servicePasses);state.guidePassed=new Set(x.guidePassed||[]);drawGuideProgress();drawGpsTrack();status('status','前回の作業状態を自動復元しました。','success')}state.restoring=false;if(state.kmzBlob)reuploadSavedKmz(state.kmzBlob,state.kmzUploadGeneration);if(state.gpsTrackingDesired)setTimeout(()=>startGpsTracking(true),500)}
+async function restoreFieldSession(){const generation=state.kmzUploadGeneration;const x=await sessionGet();if(!x||generation!==state.kmzUploadGeneration)return;state.restoring=true;state.kmzBlob=x.kmzBlob||null;state.geojson=x.geojson||null;state.areaGeojson=x.areaGeojson||null;state.summary=x.summary||null;state.areaInfo=x.areaInfo||{};state.workerId=+x.workerId||1;state.completed=new Set(x.completed||[]);state.fieldGuideLeg=+x.fieldGuideLeg||0;state.activeGuideLeg=+x.activeGuideLeg||0;state.guidePassed=new Set(x.guidePassed||[]);restoreServicePasses(x.servicePasses);state.gpsTrack=Array.isArray(x.gpsTrack)?x.gpsTrack:[];state.gpsTrackingDesired=!!x.gpsTrackingDesired;if(x.startLat&&x.startLon)setStartPoint(+x.startLat,+x.startLon);if(x.areas?.length){$('area').innerHTML=x.areas.map(a=>`<option>${escapeHtml(a)}</option>`).join('');$('area').disabled=false;$('build').disabled=false;$('refreshOsm').disabled=false;if(x.selectedArea)$('area').value=x.selectedArea}if(state.areaGeojson){renderAreaBoundaries(false);renderHouseholdInfo()}if(state.geojson){renderGeneratedMap();renderMetrics();renderDownloads();prepareWorkerUI();loadWorker(state.workerId,{preserveProgress:true});restoreServicePasses(x.servicePasses);state.guidePassed=new Set(x.guidePassed||[]);drawGuideProgress();drawGpsTrack();status('status','前回の作業状態を自動復元しました。','success')}state.restoring=false;/* KMZ auto-upload intentionally disabled: user initiated uploads are authoritative. */if(state.gpsTrackingDesired)setTimeout(()=>startGpsTracking(true),500)}
 
 async function osmDb(){return new Promise((resolve,reject)=>{const req=indexedDB.open('posting-navigator-osm',1);req.onupgradeneeded=()=>{if(!req.result.objectStoreNames.contains('snapshots'))req.result.createObjectStore('snapshots')};req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error)})}
 async function getBrowserOsmCache(area){if(!area||!('indexedDB'in window))return null;try{const db=await osmDb();return await new Promise((resolve,reject)=>{const tx=db.transaction('snapshots','readonly'),req=tx.objectStore('snapshots').get(area);req.onsuccess=()=>resolve(req.result||null);req.onerror=()=>reject(req.error)})}catch{return null}}
@@ -63,9 +63,35 @@ map.on('click',e=>{
 $('pickStart').onclick=()=>setStartPickMode(!state.startPickMode);
 $('useCurrent').onclick=()=>navigator.geolocation?.getCurrentPosition(p=>{const {latitude,longitude}=p.coords;setStartPoint(latitude,longitude,{center:true})},e=>status('status',`現在地を取得できません: ${e.message}`,'error'),{enableHighAccuracy:true});
 
-$('kmz').onchange=async()=>{const f=$('kmz').files[0];if(!f)return;const generation=++state.kmzUploadGeneration;status('status','KMZを解析中…');$('area').disabled=true;$('build').disabled=true;const fd=new FormData();fd.append('kmz',f);try{const r=await fetch(`${API}/api/areas`,{method:'POST',body:fd});const j=await r.json();if(!r.ok)throw Error(j.error||`HTTP ${r.status}`);if(generation!==state.kmzUploadGeneration)return;state.kmzBlob=f;state.uploadId=j.upload_id;state.areaGeojson=j.area_geojson||null;state.areaInfo=j.area_info||{};if(!Array.isArray(j.areas)||!j.areas.length)throw Error('KMZに選択可能な町丁目がありません');$('area').innerHTML=j.areas.map(x=>`<option>${escapeHtml(x)}</option>`).join('');$('area').disabled=false;$('build').disabled=false;$('refreshOsm').disabled=false;status('status',`${j.areas.length}件の区画を読み込みました。②から選択できます。`,'success');saveFieldSessionSoon();try{renderAreaBoundaries(true);renderHouseholdInfo()}catch(drawError){console.error('区画描画エラー:',drawError);status('status',`${j.areas.length}件の町丁目を読み込みました。境界描画のみ失敗: ${drawError.message}`,'error')}updateOsmCacheStatus()}catch(e){if(generation===state.kmzUploadGeneration){console.error('KMZ読み込み失敗:',e);status('status',`KMZ読み込み失敗: ${e.message}${e instanceof TypeError?'（通信エラー。APIへのアップロードがブロックされた可能性があります）':''}`,'error')}}};
-
-
+$('kmz').onchange=async()=>{
+  const f=$('kmz').files[0];if(!f)return;
+  const generation=++state.kmzUploadGeneration;
+  status('status','KMZを解析中…');
+  const fd=new FormData();fd.append('kmz',f);
+  try{
+    // Original v1.9.3 upload flow; no automatic upload runs alongside this request.
+    const r=await fetch(`${API}/api/areas`,{method:'POST',body:fd});
+    const raw=await r.text();let j;
+    try{j=JSON.parse(raw)}catch{throw Error(`API HTTP ${r.status}: ${raw.slice(0,160)}`)}
+    if(!r.ok)throw Error(j.error||`HTTP ${r.status}`);
+    if(generation!==state.kmzUploadGeneration)return;
+    if(!Array.isArray(j.areas)||!j.areas.length)throw Error('KMZに選択可能な町丁目がありません');
+    // A successful replacement starts a new area/route session, without deleting GPS history in storage.
+    state.uploadId=j.upload_id;state.kmzBlob=f;state.areaGeojson=j.area_geojson||null;
+    state.areaInfo=j.area_info||{};state.geojson=null;state.summary=null;
+    state.completed=new Set();state.servicePasses=new Map();state.guidePassed=new Set();
+    $('area').innerHTML=j.areas.map(x=>`<option>${escapeHtml(x)}</option>`).join('');
+    $('area').disabled=false;$('build').disabled=false;$('refreshOsm').disabled=false;
+    status('status',`${j.areas.length}件の区画を読み込みました。②から選択できます。`,'success');
+    saveFieldSessionSoon();
+    try{renderAreaBoundaries(true);renderHouseholdInfo()}catch(err){console.error('境界描画失敗',err)}
+    updateOsmCacheStatus();
+  }catch(e){
+    if(generation!==state.kmzUploadGeneration)return;
+    console.error('KMZアップロード',e);
+    status('status',`KMZ読み込み失敗: ${e.message} / API: ${API} / 通信に失敗した場合はRenderログのPOST /api/areas到達有無を確認してください。`,'error');
+  }
+};
 $('area').onchange=()=>{renderAreaBoundaries(true);renderHouseholdInfo();updateOsmCacheStatus();saveFieldSessionSoon()};
 
 function renderAreaBoundaries(fitSelected=false){
@@ -271,4 +297,4 @@ $('showNumbers')?.addEventListener('change',()=>state.navLegs?.length&&focusGuid
 
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
 
-(async()=>{await restoreFieldSession();await loadConfig()})();
+(async()=>{try{await restoreFieldSession()}catch(e){state.restoring=false;console.warn('復元失敗',e)}await loadConfig()})();
