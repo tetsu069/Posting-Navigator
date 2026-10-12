@@ -55,11 +55,13 @@ async function diagnoseUpload(){
   const steps=[];
   const record=(name,value)=>{steps.push(`${name}: ${value}`);$('uploadDiagnostic').textContent=steps.join('\n')};
   const probe=async(name,url,opts)=>{
-    const t=Date.now();try{
+    const t=Date.now();
+    try{
       const r=await fetch(url,{cache:'no-store',...opts});
-      const body=(await r.text()).slice(0,220);
+      const body=(await r.text()).slice(0,500);
       record(name,`HTTP ${r.status} (${Date.now()-t}ms) ${body}`);
-    }catch(e){record(name,`${e.name}: ${e.message} (${Date.now()-t}ms)`)}
+      return r.ok;
+    }catch(e){record(name,`${e.name}: ${e.message} (${Date.now()-t}ms)`);return false}
   };
   try{
     record('環境',`${location.origin} → ${API} / ${navigator.userAgent}`);
@@ -67,7 +69,12 @@ async function diagnoseUpload(){
     await probe('POST JSON',`${API}/api/diagnostics/upload`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({test:true})});
     const fd=new FormData();fd.append('kmz',new Blob(['test'],{type:'application/octet-stream'}),'diagnostic.kmz');
     await probe('POST FormData',`${API}/api/diagnostics/upload`,{method:'POST',body:fd});
-    record('判定','この診断では実際のKMZファイルは送信していません。結果をコピーして共有してください。');
+    const file=$('kmz').files[0];
+    if(!file){record('実KMZ','未選択。上の「1. 区画KMZ」でファイルを選択すると、実ファイル送信診断も行えます。');return}
+    record('実KMZ',`ファイル名=${file.name} / サイズ=${file.size} bytes / type=${file.type||'(empty)'}`);
+    const actual=new FormData();actual.append('kmz',file,file.name);
+    const ok=await probe('実KMZ POST (診断専用・保存なし)',`${API}/api/diagnostics/upload?inspect=1`,{method:'POST',body:actual,mode:'cors'});
+    record('判定',ok?'実KMZの転送は成功。通常の /api/areas の解析・応答処理を次に調査してください。':'実KMZの転送または診断応答に失敗。直前のエラーとRenderログを共有してください。');
   }finally{btn.disabled=false}
 }
 $('diagnoseUpload').onclick=diagnoseUpload;
@@ -78,8 +85,8 @@ $('kmz').onchange=async()=>{
   const fd=new FormData();fd.append('kmz',f);
   try{
     // Original v1.9.3 upload flow; no automatic upload runs alongside this request.
-    const started=Date.now();const r=await fetch(`${API}/api/areas?compact=1`,{method:'POST',body:fd,cache:'no-store',mode:'cors'});
-    const raw=await r.text();let j;
+    const started=Date.now();console.info('[KMZ] upload start',{name:f.name,bytes:f.size,api:API});status('status',`KMZ送信中: ${(f.size/1024).toFixed(1)} KB → ${API}/api/areas`);const r=await fetch(`${API}/api/areas?compact=1`,{method:'POST',body:fd,cache:'no-store',mode:'cors'});console.info('[KMZ] response headers',{status:r.status,elapsed_ms:Date.now()-started});
+    status('status',`KMZ応答を受信: HTTP ${r.status} / ${Date.now()-started}ms。解析中…`);const raw=await r.text();console.info('[KMZ] response body received',{bytes:raw.length,elapsed_ms:Date.now()-started});let j;
     try{j=JSON.parse(raw)}catch{throw Error(`API HTTP ${r.status}: ${raw.slice(0,160)}`)}
     if(!r.ok)throw Error(j.error||`HTTP ${r.status}`);
     if(generation!==state.kmzUploadGeneration)return;
@@ -99,7 +106,7 @@ $('kmz').onchange=async()=>{
   }catch(e){
     if(generation!==state.kmzUploadGeneration)return;
     console.error('KMZアップロード',e,'API:',API,'origin:',location.origin);
-    status('status',`KMZ読み込み失敗: ${e.message} / API: ${API} / 通信に失敗した場合はRenderログのPOST /api/areas到達有無を確認してください。`,'error');
+    status('status',`KMZ読み込み失敗: ${e.name}: ${e.message} / API: ${API} / 上の「KMZ通信を診断」で実KMZ送信を確認できます。`,'error');
   }
 };
 $('area').onchange=()=>{renderAreaBoundaries(true);renderHouseholdInfo();updateOsmCacheStatus();saveFieldSessionSoon()};
@@ -298,7 +305,7 @@ function setupGoogleLogin(){const cid=state.config.google_client_id;if(!cid){$('
 function renderLogin(){if(state.user){$('loginBox').innerHTML=`<button id="logout" class="ghost">${escapeHtml(state.user.name||state.user.email)} ▾</button>`;$('logout').onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'})}catch{}state.sessionToken='';state.user=null;localStorage.removeItem('pn_session');$('myProjectsBox').classList.add('hidden');renderLogin()}}else if(window.google){$('loginBox').innerHTML='<div id="googleBtn"></div>';google.accounts.id.renderButton($('googleBtn'),{theme:'outline',size:'medium',text:'signin_with',shape:'pill'})}}
 
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')saveFieldSession();else{drawGpsTrack();if(state.gpsTrackingDesired&&state.watchId===null)startGpsTracking(true)}});window.addEventListener('pagehide',()=>saveFieldSession());
-let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.12',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
+let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.13',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
 
 function haversine(lat1,lon1,lat2,lon2){const R=6371000,p=Math.PI/180,dLat=(lat2-lat1)*p,dLon=(lon2-lon1)*p,a=Math.sin(dLat/2)**2+Math.cos(lat1*p)*Math.cos(lat2*p)*Math.sin(dLon/2)**2;return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))}
 function pointSegmentMeters(lat,lon,lat1,lon1,lat2,lon2){const mLat=(lat+lat1+lat2)/3*Math.PI/180,x=(v)=>v*Math.PI/180*6371000*Math.cos(mLat),y=(v)=>v*Math.PI/180*6371000;const px=x(lon),py=y(lat),ax=x(lon1),ay=y(lat1),bx=x(lon2),by=y(lat2),dx=bx-ax,dy=by-ay;const t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/(dx*dx+dy*dy||1)));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy))}

@@ -240,6 +240,23 @@ def api_upload_diagnostic():
     # No uploads are persisted. Do not log file contents or user identifiers.
     if request.method == "OPTIONS":
         return "", 204
+    if request.args.get("inspect") == "1":
+        # Consume the uploaded KMZ without saving it or changing any session.
+        uploaded = request.files.get("kmz")
+        if uploaded is None:
+            return jsonify(ok=False, error="kmz field missing"), 400
+        size = 0
+        signature = b""
+        while True:
+            chunk = uploaded.stream.read(1024 * 1024)
+            if not chunk:
+                break
+            if not signature:
+                signature = chunk[:4]
+            size += len(chunk)
+        return jsonify(ok=True, method="POST", filename=uploaded.filename,
+                       received_file_bytes=size, zip_signature=signature.hex(),
+                       is_zip=signature.startswith(b"PK"), persisted=False)
     return jsonify(ok=True, method=request.method, content_type=request.mimetype,
                    received_bytes=request.content_length, file_count=len(request.files))
 
