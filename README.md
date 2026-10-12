@@ -91,5 +91,5 @@ PCの巡回ガイドで「次へ」または後方の番号を選ぶと、通過
 
 v1.9.13: KMZの手動読み込みを優先し、自動復元リクエストが手動選択を上書きする競合を防止。起動時の復元順序も変更。
 
-### v1.9.14 Android KMZ送信代替経路
+### v1.9.15 Android KMZ送信代替経路
 Androidで実KMZ multipart送信が Failed to fetch となる場合、File.arrayBuffer() を使った application/octet-stream 送信へ自動フォールバック。診断にもRAW POSTを追加。既存のGPS記録やルート計算は変更なし。
