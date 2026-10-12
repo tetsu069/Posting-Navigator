@@ -1505,6 +1505,51 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                     if undeg.get(turn_node,0) != 1 and not artificial_cut(turn_node):
                         bad_reverse += 2000000.0 + travelled * 2000.0
         return (major_reverse,bad_reverse,turns)
+    def neighborhood_quality(circ, graph):
+        """Prefer a human-readable contiguous sweep over an arbitrary Euler tour.
+
+        This is a soft preference: service coverage and feasible directed
+        circulation are still hard requirements.  A block is only counted as
+        revisited after another block was visited, and immediate dead-end
+        branches are counted when skipped at their junction.
+        """
+        if not circ:
+            return (math.inf, math.inf, math.inf, math.inf)
+        visited_blocks=set()
+        active=None
+        block_reentries=0
+        radial_backtrack=0.0
+        skipped_spurs=0
+        completed_physical=set()
+        prev_radius=None
+        origin=local_entry
+        for u,v,k in circ:
+            d=graph.get_edge_data(u,v,k) or {}
+            if d.get('boundary_balance_transfer'):
+                continue
+            block=d.get('sweep_block')
+            if block is not None and block != active:
+                if block in visited_blocks:
+                    block_reentries += 1
+                visited_blocks.add(block)
+                active=block
+            radius=_dist_m(origin, _edge_midpoint(d,u,v))
+            if prev_radius is not None and radius + 65.0 < prev_radius:
+                radial_backtrack += prev_radius-radius-65.0
+            prev_radius=radius
+            # A branch encountered at a junction should be completed before
+            # leaving the junction for another road. Ignore the reverse side
+            # of a branch already serviced.
+            if movement_graph.has_node(u):
+                for nbr in movement_graph.neighbors(u):
+                    if undeg.get(nbr,0) != 1 or nbr == v:
+                        continue
+                    pair=_edge_pair_key(u,nbr)
+                    if pair not in completed_physical:
+                        skipped_spurs += 1
+            completed_physical.add(_edge_pair_key(u,v))
+        return (block_reentries, skipped_spurs, round(radial_backtrack,2), len(circ))
+
     orders=[list(base),list(reversed(base))]
     rng=random.Random(1830+len(base)*17)
     # v1.8.3: candidate ordering used to grow to 258 complete Euler/balancing
@@ -1566,7 +1611,12 @@ def _side_task_block_circuit(block_graph: nx.MultiGraph, entry, *, component: in
                 if deficit or surplus or not nx.is_eulerian(bg):continue
                 g=bg;trail=euler_circuit_avoid_reverse(g,local_entry,seed=len(order)*31);trail_start=local_entry
         except Exception:continue
-        sc=score(trail,g);sc=(sc[0],sc[1],_dist_m(local_entry,trail_start),sc[2])
+        sc=score(trail,g)
+        locality=neighborhood_quality(trail,g)
+        # Hard avoidance of illegal reversals first, then local completion.
+        # Do not let a short walk win by repeatedly revisiting distant blocks.
+        sc=(sc[0],sc[1],locality[0],locality[1],locality[2],
+            _dist_m(local_entry,trail_start),sc[2])
         if best is None or sc<best[0]:best=(sc,trail,g,trail_start)
     if best is None:raise nx.NetworkXError("ハイブリッド配布タスクを小区画内で完了できません")
     _,circ,g,trail_start=best
@@ -1855,7 +1905,7 @@ def generate_route(roads: list[dict], start_point: tuple[float, float] | None = 
         "midroad_uturn_count": midroad_uturns,
         "routing_strategy": "side-service-task-block-completion",
         "component_routing": "deferred-opposite-side-service",
-        "routing_strategy_version": "1.9.10",
+        "routing_strategy_version": "1.9.16",
         "start_lon": first_start[0],
         "start_lat": first_start[1],
     }
