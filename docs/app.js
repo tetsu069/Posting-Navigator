@@ -74,7 +74,14 @@ async function diagnoseUpload(){
     record('実KMZ',`ファイル名=${file.name} / サイズ=${file.size} bytes / type=${file.type||'(empty)'}`);
     const actual=new FormData();actual.append('kmz',file,file.name);
     const ok=await probe('実KMZ POST (診断専用・保存なし)',`${API}/api/diagnostics/upload?inspect=1`,{method:'POST',body:actual,mode:'cors'});
-    record('判定',ok?'実KMZの転送は成功。通常の /api/areas の解析・応答処理を次に調査してください。':'実KMZの転送または診断応答に失敗。直前のエラーとRenderログを共有してください。');
+    if(!ok){
+      try{
+        const bytes=await file.arrayBuffer();
+        record('ArrayBuffer読込',`${bytes.byteLength} bytes / 先頭=${Array.from(new Uint8Array(bytes.slice(0,4))).map(x=>x.toString(16).padStart(2,'0')).join('')}`);
+        const rawOk=await probe('実KMZ RAW POST (保存なし)',`${API}/api/diagnostics/raw`,{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:bytes,mode:'cors'});
+        record('判定',rawOk?'RAW送信成功。通常読み込みではRAW経路に自動切替します。':'RAW送信も失敗。ファイル本体の送信が端末・ネットワークで遮断される可能性があります。');
+      }catch(e){record('RAW診断',`${e.name}: ${e.message}`)}
+    }else record('判定','実KMZのFormData転送は成功しました。');
   }finally{btn.disabled=false}
 }
 $('diagnoseUpload').onclick=diagnoseUpload;
@@ -85,7 +92,15 @@ $('kmz').onchange=async()=>{
   const fd=new FormData();fd.append('kmz',f);
   try{
     // Original v1.9.3 upload flow; no automatic upload runs alongside this request.
-    const started=Date.now();console.info('[KMZ] upload start',{name:f.name,bytes:f.size,api:API});status('status',`KMZ送信中: ${(f.size/1024).toFixed(1)} KB → ${API}/api/areas`);const r=await fetch(`${API}/api/areas?compact=1`,{method:'POST',body:fd,cache:'no-store',mode:'cors'});console.info('[KMZ] response headers',{status:r.status,elapsed_ms:Date.now()-started});
+    const started=Date.now();console.info('[KMZ] upload start',{name:f.name,bytes:f.size,api:API});status('status',`KMZ送信中: ${(f.size/1024).toFixed(1)} KB → ${API}/api/areas`);let r;let uploadMethod='FormData';try{
+      r=await fetch(`${API}/api/areas?compact=1`,{method:'POST',body:fd,cache:'no-store',mode:'cors'});
+    }catch(formError){
+      console.warn('[KMZ] multipart upload failed; retrying raw binary',formError);
+      status('status','FormData送信に失敗。KMZをバイナリ形式で再送信中…');
+      const bytes=await f.arrayBuffer();
+      uploadMethod='RAW';
+      r=await fetch(`${API}/api/areas/raw?compact=1`,{method:'POST',body:bytes,headers:{'Content-Type':'application/octet-stream'},cache:'no-store',mode:'cors'});
+    }console.info('[KMZ] upload method',uploadMethod);console.info('[KMZ] response headers',{status:r.status,elapsed_ms:Date.now()-started});
     status('status',`KMZ応答を受信: HTTP ${r.status} / ${Date.now()-started}ms。解析中…`);const raw=await r.text();console.info('[KMZ] response body received',{bytes:raw.length,elapsed_ms:Date.now()-started});let j;
     try{j=JSON.parse(raw)}catch{throw Error(`API HTTP ${r.status}: ${raw.slice(0,160)}`)}
     if(!r.ok)throw Error(j.error||`HTTP ${r.status}`);

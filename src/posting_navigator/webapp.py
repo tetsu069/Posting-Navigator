@@ -261,6 +261,37 @@ def api_upload_diagnostic():
                    received_bytes=request.content_length, file_count=len(request.files))
 
 
+@app.post("/api/diagnostics/raw")
+def api_diagnostics_raw():
+    # Raw binary transport bypasses Android multipart File/FormData handling.
+    # Do not persist or parse the submitted content as an archive.
+    payload = request.get_data(cache=False)
+    return jsonify(ok=True, method="POST", received_file_bytes=len(payload),
+                   zip_signature=payload[:4].hex(), is_zip=payload.startswith(b"PK"),
+                   persisted=False)
+
+
+@app.post("/api/areas/raw")
+def api_areas_raw():
+    # Same response contract as /api/areas, without multipart parsing.
+    payload = request.get_data(cache=False)
+    if not payload.startswith(b"PK"):
+        return jsonify(error="KMZ(ZIP)形式のファイルを選択してください"), 400
+    upload_id = uuid.uuid4().hex
+    path = UPLOADS / f"{upload_id}.kmz"
+    path.write_bytes(payload)
+    try:
+        areas = list_areas_from_kmz(path)
+        area_geojson = list_area_geojson_from_kmz(path)
+        area_info = list_area_info_from_kmz(path)
+    except Exception as exc:
+        path.unlink(missing_ok=True)
+        return jsonify(error=f"KMZを解析できません: {exc}"), 400
+    if request.args.get("compact") == "1":
+        return jsonify(upload_id=upload_id, areas=areas)
+    return jsonify(upload_id=upload_id, areas=areas, area_geojson=area_geojson, area_info=area_info)
+
+
 @app.post("/api/areas")
 def api_areas():
     file = request.files.get("kmz")
