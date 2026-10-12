@@ -235,6 +235,15 @@ def api_osm_cache_import():
         return jsonify(error=f"OSMキャッシュを復元できません: {exc}"), 400
 
 
+@app.route("/api/diagnostics/upload", methods=["POST", "OPTIONS"])
+def api_upload_diagnostic():
+    # No uploads are persisted. Do not log file contents or user identifiers.
+    if request.method == "OPTIONS":
+        return "", 204
+    return jsonify(ok=True, method=request.method, content_type=request.mimetype,
+                   received_bytes=request.content_length, file_count=len(request.files))
+
+
 @app.post("/api/areas")
 def api_areas():
     file = request.files.get("kmz")

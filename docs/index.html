@@ -14,7 +14,7 @@
 <div class="app-shell">
   <header class="topbar">
     <div><h1>Posting Navigator</h1><p>ルート作成・GPS進捗・進捗共有</p></div>
-    <div class="top-actions"><span class="badge">v1.9.11</span><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
+    <div class="top-actions"><span class="badge">v1.9.12</span><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
   </header>
 
   <main class="layout">
@@ -31,6 +31,8 @@
         <div class="hint">KMZを読み込むと町丁目一覧を取得します。</div>
 
         <label>2. 対象町丁目</label>
+      <button type="button" id="diagnoseUpload" class="ghost">KMZ通信を診断（データは変更しません）</button>
+      <pre id="uploadDiagnostic" style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;max-height:260px;overflow:auto" aria-live="polite"></pre>
         <select id="area" disabled><option>KMZを先に選択</option></select>
         <div id="householdBox" class="household-box hidden"><span>世帯数</span><b id="householdTotal">—</b><small>KMZ登録値</small></div>
 

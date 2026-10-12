@@ -49,6 +49,28 @@ map.on('click',e=>{
 $('pickStart').onclick=()=>setStartPickMode(!state.startPickMode);
 $('useCurrent').onclick=()=>navigator.geolocation?.getCurrentPosition(p=>{const {latitude,longitude}=p.coords;setStartPoint(latitude,longitude,{center:true})},e=>status('status',`現在地を取得できません: ${e.message}`,'error'),{enableHighAccuracy:true});
 
+// Network diagnosis is independent of KMZ parsing and never changes saved sessions.
+async function diagnoseUpload(){
+  const btn=$('diagnoseUpload');btn.disabled=true;
+  const steps=[];
+  const record=(name,value)=>{steps.push(`${name}: ${value}`);$('uploadDiagnostic').textContent=steps.join('\n')};
+  const probe=async(name,url,opts)=>{
+    const t=Date.now();try{
+      const r=await fetch(url,{cache:'no-store',...opts});
+      const body=(await r.text()).slice(0,220);
+      record(name,`HTTP ${r.status} (${Date.now()-t}ms) ${body}`);
+    }catch(e){record(name,`${e.name}: ${e.message} (${Date.now()-t}ms)`)}
+  };
+  try{
+    record('環境',`${location.origin} → ${API} / ${navigator.userAgent}`);
+    await probe('GET',`${API}/api/config`);
+    await probe('POST JSON',`${API}/api/diagnostics/upload`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({test:true})});
+    const fd=new FormData();fd.append('kmz',new Blob(['test'],{type:'application/octet-stream'}),'diagnostic.kmz');
+    await probe('POST FormData',`${API}/api/diagnostics/upload`,{method:'POST',body:fd});
+    record('判定','この診断では実際のKMZファイルは送信していません。結果をコピーして共有してください。');
+  }finally{btn.disabled=false}
+}
+$('diagnoseUpload').onclick=diagnoseUpload;
 $('kmz').onchange=async()=>{
   const f=$('kmz').files[0];if(!f)return;
   const generation=++state.kmzUploadGeneration;
@@ -276,7 +298,7 @@ function setupGoogleLogin(){const cid=state.config.google_client_id;if(!cid){$('
 function renderLogin(){if(state.user){$('loginBox').innerHTML=`<button id="logout" class="ghost">${escapeHtml(state.user.name||state.user.email)} ▾</button>`;$('logout').onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'})}catch{}state.sessionToken='';state.user=null;localStorage.removeItem('pn_session');$('myProjectsBox').classList.add('hidden');renderLogin()}}else if(window.google){$('loginBox').innerHTML='<div id="googleBtn"></div>';google.accounts.id.renderButton($('googleBtn'),{theme:'outline',size:'medium',text:'signin_with',shape:'pill'})}}
 
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')saveFieldSession();else{drawGpsTrack();if(state.gpsTrackingDesired&&state.watchId===null)startGpsTracking(true)}});window.addEventListener('pagehide',()=>saveFieldSession());
-let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.6',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
+let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.12',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
 
 function haversine(lat1,lon1,lat2,lon2){const R=6371000,p=Math.PI/180,dLat=(lat2-lat1)*p,dLon=(lon2-lon1)*p,a=Math.sin(dLat/2)**2+Math.cos(lat1*p)*Math.cos(lat2*p)*Math.sin(dLon/2)**2;return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))}
 function pointSegmentMeters(lat,lon,lat1,lon1,lat2,lon2){const mLat=(lat+lat1+lat2)/3*Math.PI/180,x=(v)=>v*Math.PI/180*6371000*Math.cos(mLat),y=(v)=>v*Math.PI/180*6371000;const px=x(lon),py=y(lat),ax=x(lon1),ay=y(lat1),bx=x(lon2),by=y(lat2),dx=bx-ax,dy=by-ay;const t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/(dx*dx+dy*dy||1)));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy))}
