@@ -14,7 +14,7 @@
 <div class="app-shell">
   <header class="topbar">
     <div><h1>Posting Navigator</h1><p>ルート作成・GPS進捗・進捗共有</p></div>
-    <div class="top-actions"><span class="badge">v1.9.17</span><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
+    <div class="top-actions"><span class="badge">v1.9.19</span><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
   </header>
 
   <main class="layout">
@@ -49,6 +49,7 @@
         <label class="check"><input id="fallback" type="checkbox"> OSM取得失敗時に確認用データを使用</label>
         <div class="display-settings"><b>ルート表示</b><label class="check"><input id="showArrows" type="checkbox" checked> 選択中の区間だけ進行方向を表示</label><label class="check"><input id="showNumbers" type="checkbox" checked> 選択中の区間番号を表示</label><div class="hint">赤＝全体ルート、青＝いま確認している区間、水色点線＝次の区間。回る順番は下の一覧で1→2→3…と表示します。</div></div>
         <button id="build" disabled>巡回ルートを生成</button>
+        <button id="clearRouteDisplay" type="button" class="secondary">巡回ルート表示を消去（GPS軌跡は残す）</button>
         <div id="status" class="status">KMZを選択してください。</div>
         <div id="metrics" class="metrics hidden"></div><div id="routeGuide" class="route-guide hidden"></div>
         <div id="downloads" class="downloads hidden"></div>
@@ -83,7 +84,7 @@
       </section>
     </aside>
 
-    <section class="panel map-panel"><div id="map"></div></section>
+    <section class="panel map-panel"><button id="expandMap" class="map-expand-button" type="button" aria-pressed="false">地図を全画面表示</button><div id="map"></div></section>
   </main>
 </div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>

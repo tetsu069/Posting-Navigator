@@ -112,7 +112,7 @@ $('kmz').onchange=async()=>{
     if(generation!==state.kmzUploadGeneration)return;
     if(!Array.isArray(j.areas)||!j.areas.length)throw Error('KMZに選択可能な町丁目がありません');
     // A successful replacement starts a new area/route session, without deleting GPS history in storage.
-    clearRouteLayers();state.jobId=null;state.navLegs=[];state.layers.areas?.remove();state.layers.areas=null;$('downloads').classList.add('hidden');state.uploadId=j.upload_id;state.kmzBlob=f;state.areaGeojson=j.area_geojson||null;
+    clearRouteLayers();clearRouteUi();state.jobId=null;state.navLegs=[];state.layers.areas?.remove();state.layers.areas=null;$('downloads').classList.add('hidden');state.uploadId=j.upload_id;state.kmzBlob=f;state.areaGeojson=j.area_geojson||null;
     state.areaInfo=j.area_info||{};state.geojson=null;state.summary=null;state.projectId=null;state.shareCode=null;
     state.completed=new Set();state.roadPasses={};state.servicePasses=new Map();state.guidePassed=new Set();state.activeGuideLeg=0;state.fieldGuideLeg=0;
     $('area').innerHTML=j.areas.map(x=>`<option>${escapeHtml(x)}</option>`).join('');
@@ -202,7 +202,39 @@ function renderGeneratedMap(){
   if(legs.length)focusGuideLeg(0,false);
   const b=state.layers.generated.getBounds();if(b.isValid())map.fitBounds(b,{padding:[15,15]})
 }
-function clearRouteLayers(){['generated','todo','done','gps','directions','sequence','focus','nextPreview','guideProgress'].forEach(k=>{if(state.layers[k]){state.layers[k].remove();state.layers[k]=null}})}
+function clearRouteUi(){
+  for(const id of ['routeGuide','metrics','downloads','nextGuide','householdProgress']){
+    const el=$(id);if(el){el.classList.add('hidden');if(id==='routeGuide'||id==='nextGuide')el.innerHTML='';}
+  }
+  state.segments=[];state.segmentLengths=[];state.navLegs=[];
+  state.completed=new Set();state.roadPasses={};state.servicePasses=new Map();state.guidePassed=new Set();
+  state.activeGuideLeg=0;state.fieldGuideLeg=0;
+  if($('fieldPercent'))$('fieldPercent').textContent='0%';
+  if($('fieldDistance'))$('fieldDistance').textContent='0 / 0 km';
+}
+function removeRouteDisplay(){
+  if(!confirm('巡回ルートの表示と現在のルート進捗を消去しますか？ GPSの歩行軌跡とKMZ境界は残ります。'))return;
+  // Prevent an old asynchronous team progress response from restoring the old colors.
+  if(state.syncTimer){clearInterval(state.syncTimer);state.syncTimer=null;}
+  state.projectId=null;state.shareCode=null;state.jobId=null;state.geojson=null;state.summary=null;
+  clearRouteLayers();clearRouteUi();
+  if(state.layers.gpsTrack)state.layers.gpsTrack.bringToFront?.();
+  if(state.layers.gps)state.layers.gps.bringToFront?.();
+  const project=$('projectBox');if(project)project.classList.add('hidden');
+  saveFieldSessionSoon();status('status','ルート表示を消去しました。GPS軌跡とKMZ境界は保持しています。','success');
+}
+$('clearRouteDisplay').onclick=removeRouteDisplay;
+let mapExpanded=false;
+function setMapExpanded(on){
+  mapExpanded=!!on;document.body.classList.toggle('map-expanded',mapExpanded);
+  const button=$('expandMap');button.textContent=mapExpanded?'縮小して戻る':'地図を全画面表示';
+  button.setAttribute('aria-pressed',String(mapExpanded));
+  // Recalculate Leaflet dimensions after the fixed-position panel is laid out.
+  requestAnimationFrame(()=>map.invalidateSize());setTimeout(()=>map.invalidateSize(),250);
+}
+$('expandMap').onclick=()=>setMapExpanded(!mapExpanded);
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&mapExpanded)setMapExpanded(false)});
+function clearRouteLayers(){['generated','todo','once','roundtrip','done','directions','sequence','focus','nextPreview','guideProgress'].forEach(k=>{if(state.layers[k]){state.layers[k].remove();state.layers[k]=null}})}
 function bearingDeg(a,b){const p=Math.PI/180,y=Math.sin((b[0]-a[0])*p)*Math.cos(b[1]*p),x=Math.cos(a[1]*p)*Math.sin(b[1]*p)-Math.sin(a[1]*p)*Math.cos(b[1]*p)*Math.cos((b[0]-a[0])*p);return(Math.atan2(y,x)/p+360)%360}
 function interpolateCoord(a,b,t){return[a[0]+(b[0]-a[0])*t,a[1]+(b[1]-a[1])*t]}
 function arrowSvg(){return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 1.5 4.5 10H9v12h6V10h4.5z"/></svg>'}
@@ -272,7 +304,8 @@ function focusGuideLeg(index,fit=true){
   const counter=$('guideCounter');if(counter)counter.textContent=`${index+1} / ${state.navLegs.length}`;
   const title=$('guideCurrent');if(title)title.innerHTML=`<b>${p.leg}. ${escapeHtml(p.turn||'進む')}</b><span>${escapeHtml(p.name||'道路に沿って進む')} ・ 約${Math.round(p.length_m||0)}m</span>`;
   $('guidePrev')&&( $('guidePrev').disabled=index===0 );$('guideNext')&&( $('guideNext').disabled=index===state.navLegs.length-1 );
-  const item=document.querySelector(`.guide-item[data-index="${index}"]`);item?.scrollIntoView({block:'nearest'});
+  // Never programmatically scroll the page, controls, or guide list.
+  // Users must retain control of their own scroll position during GPS updates.
   if(fit){const b=state.layers.focus.getBounds();if(b.isValid())map.fitBounds(b,{padding:[80,80],maxZoom:18})}
 }
 function renderRouteGuide(legs){
@@ -331,7 +364,7 @@ function setupGoogleLogin(){const cid=state.config.google_client_id;if(!cid){$('
 function renderLogin(){if(state.user){$('loginBox').innerHTML=`<button id="logout" class="ghost">${escapeHtml(state.user.name||state.user.email)} ▾</button>`;$('logout').onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'})}catch{}state.sessionToken='';state.user=null;localStorage.removeItem('pn_session');$('myProjectsBox').classList.add('hidden');renderLogin()}}else if(window.google){$('loginBox').innerHTML='<div id="googleBtn"></div>';google.accounts.id.renderButton($('googleBtn'),{theme:'outline',size:'medium',text:'signin_with',shape:'pill'})}}
 
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'){saveFieldSession();gpsTrackPut();}else{drawGpsTrack();if(state.gpsTrackingDesired&&state.watchId===null)startGpsTracking(true)}});window.addEventListener('pagehide',()=>{saveFieldSession();gpsTrackPut()});
-let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.17',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
+let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.19',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
 
 function haversine(lat1,lon1,lat2,lon2){const R=6371000,p=Math.PI/180,dLat=(lat2-lat1)*p,dLon=(lon2-lon1)*p,a=Math.sin(dLat/2)**2+Math.cos(lat1*p)*Math.cos(lat2*p)*Math.sin(dLon/2)**2;return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))}
 function pointSegmentMeters(lat,lon,lat1,lon1,lat2,lon2){const mLat=(lat+lat1+lat2)/3*Math.PI/180,x=(v)=>v*Math.PI/180*6371000*Math.cos(mLat),y=(v)=>v*Math.PI/180*6371000;const px=x(lon),py=y(lat),ax=x(lon1),ay=y(lat1),bx=x(lon2),by=y(lat2),dx=bx-ax,dy=by-ay;const t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/(dx*dx+dy*dy||1)));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy))}

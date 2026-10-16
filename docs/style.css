@@ -56,3 +56,13 @@
 /* v1.9.1: PC guide progress */
 .guide-item.passed{border-color:#93c5fd;background:#eff6ff}
 .guide-item.passed .guide-num{background:#2563eb;color:#fff}
+
+/* v1.9.19: no automatic scroll anchoring while GPS guidance updates */
+html,body,.app-shell,.controls,.guide-list{overflow-anchor:none}
+.controls{scroll-behavior:auto;overscroll-behavior-y:contain}
+.map-panel{position:relative}
+.map-expand-button{position:absolute;right:18px;top:18px;z-index:1100;width:auto;margin:0;padding:10px 14px;background:#0f172a;color:white;border:2px solid white;box-shadow:0 3px 12px #0004;border-radius:10px}
+body.map-expanded{overflow:hidden!important}
+body.map-expanded .map-panel{position:fixed!important;inset:0!important;z-index:10000!important;width:100vw!important;height:100dvh!important;max-height:none!important;margin:0!important;padding:0!important;border:0!important;border-radius:0!important}
+body.map-expanded .map-panel #map{height:100%!important;min-height:0!important;width:100%!important;border-radius:0!important}
+body.map-expanded .map-expand-button{right:max(12px,env(safe-area-inset-right));top:max(12px,env(safe-area-inset-top));z-index:1100}
