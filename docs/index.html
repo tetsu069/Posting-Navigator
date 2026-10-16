@@ -14,7 +14,7 @@
 <div class="app-shell">
   <header class="topbar">
     <div><h1>Posting Navigator</h1><p>ルート作成・GPS進捗・進捗共有</p></div>
-    <div class="top-actions"><span class="badge">v1.9.19</span><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
+    <div class="top-actions"><span class="badge">v1.9.20</span><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
   </header>
 
   <main class="layout">
@@ -63,6 +63,7 @@
         <label>担当者</label>
         <select id="fieldWorker"></select>
         <div class="row buttons"><button id="gpsStart">GPS開始</button><button id="gpsStop" class="danger" disabled>GPS停止</button></div>
+        <button id="clearGpsTrack" type="button" class="secondary">GPS軌跡を消去（巡回ルート・進捗は残す）</button>
         <label class="check"><input id="autoFollow" type="checkbox" checked> 現在地を地図中央に追従</label>
         <label>完了判定距離</label>
         <div class="row"><input id="gpsThreshold" type="range" min="8" max="40" value="18"><div class="range-value"><span id="gpsThresholdText">18</span>m</div></div>
@@ -84,7 +85,7 @@
       </section>
     </aside>
 
-    <section class="panel map-panel"><button id="expandMap" class="map-expand-button" type="button" aria-pressed="false">地図を全画面表示</button><div id="map"></div></section>
+    <section class="panel map-panel"><button type="button" id="toggleMapFullscreen" class="map-fullscreen-toggle" aria-pressed="false">地図を全画面表示</button><div id="map"></div></section>
   </main>
 </div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>

@@ -57,12 +57,21 @@
 .guide-item.passed{border-color:#93c5fd;background:#eff6ff}
 .guide-item.passed .guide-num{background:#2563eb;color:#fff}
 
-/* v1.9.19: no automatic scroll anchoring while GPS guidance updates */
-html,body,.app-shell,.controls,.guide-list{overflow-anchor:none}
-.controls{scroll-behavior:auto;overscroll-behavior-y:contain}
+/* v1.9.19: isolate mobile scrolling from map and live GPS updates. */
+html,body{overflow-anchor:none}
+.controls,.guide-list{overflow-anchor:none}
 .map-panel{position:relative}
-.map-expand-button{position:absolute;right:18px;top:18px;z-index:1100;width:auto;margin:0;padding:10px 14px;background:#0f172a;color:white;border:2px solid white;box-shadow:0 3px 12px #0004;border-radius:10px}
-body.map-expanded{overflow:hidden!important}
-body.map-expanded .map-panel{position:fixed!important;inset:0!important;z-index:10000!important;width:100vw!important;height:100dvh!important;max-height:none!important;margin:0!important;padding:0!important;border:0!important;border-radius:0!important}
-body.map-expanded .map-panel #map{height:100%!important;min-height:0!important;width:100%!important;border-radius:0!important}
-body.map-expanded .map-expand-button{right:max(12px,env(safe-area-inset-right));top:max(12px,env(safe-area-inset-top));z-index:1100}
+.map-fullscreen-toggle{position:absolute;top:18px;right:18px;z-index:1001;width:auto;margin:0;padding:10px 13px;background:#fff;color:#0f172a;border:1px solid #cbd5e1;box-shadow:0 2px 8px #0003;font-size:13px}
+body.map-fullscreen{overflow:hidden!important}
+body.map-fullscreen .map-panel{position:fixed!important;inset:0!important;z-index:5000!important;margin:0!important;border:0!important;border-radius:0!important;padding:0!important;height:100dvh!important;width:100vw!important}
+body.map-fullscreen #map{width:100%!important;height:100%!important;min-height:0!important;border-radius:0!important}
+body.map-fullscreen .map-fullscreen-toggle{top:max(12px,env(safe-area-inset-top));right:max(12px,env(safe-area-inset-right))}
+@media(max-width:900px){
+ html,body{height:100%;height:100dvh;overflow:hidden!important}
+ .app-shell{height:100%;height:100dvh;display:flex;flex-direction:column;overflow:hidden;min-height:0}
+ .topbar{flex:0 0 auto}
+ .layout{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow:hidden;gap:8px}
+ .map-panel{order:0;flex:0 0 46%;min-height:0;overflow:hidden}
+ #map{height:100%;min-height:0}
+ .controls{order:1;flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+}
