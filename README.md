@@ -101,3 +101,7 @@ Androidで実KMZ multipart送信が Failed to fetch となる場合、File.array
 - 不正な途中折り返しの拒否は従来どおり優先。
 - これは巡回候補の採点改善であり、街区階層ルーターへの全面置換ではない。実地の格子・袋小路・外周で目視検証が必要。
 - Android KMZ RAW fallback、GPS色分け、端末内保存は変更しない。
+
+
+### v1.9.21 GPS display filtering
+GPS display now rejects low-quality fixes and implausible jumps, suppresses small jitter and conservatively snaps near existing generated-route road segments. Raw GPS data remains stored; delivery-progress evidence uses raw measurements. This is NOT full OSM map matching and may not follow roads outside the generated route.

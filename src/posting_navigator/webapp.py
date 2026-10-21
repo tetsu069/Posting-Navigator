@@ -480,3 +480,40 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+@app.get('/api/gps-roads')
+def api_gps_roads():
+    """Small cached OSM street tiles for GPS display outside a planned route."""
+    import math
+    from .osm import _post_query, DEFAULT_ENDPOINTS
+    import requests
+    try:
+        lat = float(request.args['lat']); lon = float(request.args['lon'])
+        if not (math.isfinite(lat) and math.isfinite(lon) and -85 <= lat <= 85 and -180 <= lon <= 180):
+            raise ValueError()
+    except (KeyError, ValueError):
+        return jsonify(error='緯度・経度が不正です'), 400
+    # Deterministic ~400 m tiles, shared by nearby GPS measurements.
+    ty = math.floor(lat * 250); tx = math.floor(lon * 250)
+    path = OSM_CACHE / f'gps_tile_{ty}_{tx}.json'
+    if path.exists():
+        try:
+            return jsonify(json.loads(path.read_text(encoding='utf-8')))
+        except (ValueError, OSError):
+            pass
+    south, north = (ty - 1) / 250, (ty + 2) / 250
+    west, east = (tx - 1) / 250, (tx + 2) / 250
+    query = (f'[out:json][timeout:25];way["highway"]'
+             f'({south:.6f},{west:.6f},{north:.6f},{east:.6f});out tags geom;')
+    last_error = None
+    for endpoint in DEFAULT_ENDPOINTS[:2]:
+        try:
+            with requests.Session() as session:
+                data = _post_query(session, endpoint, query, 30)
+            temp = path.with_suffix('.tmp')
+            temp.write_text(json.dumps(data), encoding='utf-8')
+            temp.replace(path)
+            return jsonify(data)
+        except Exception as exc:
+            last_error = str(exc)
+    return jsonify(error=f'OSM道路取得に失敗: {last_error}'), 503

@@ -1,7 +1,7 @@
 const configured=(window.POSTING_NAVIGATOR_API||'').replace(/\/$/,'');
 const API=configured || location.origin;
 const $=id=>document.getElementById(id);
-const state={uploadId:null,jobId:null,geojson:null,areaGeojson:null,summary:null,projectId:null,shareCode:null,workerId:1,watchId:null,current:null,completed:new Set(),segments:[],segmentLengths:[],layers:{},syncTimer:null,config:{gps_threshold_m:18,sync_interval_ms:5000},areaInfo:{},fieldGuideLeg:0,lastPosition:null,sessionToken:localStorage.getItem('pn_session')||'',user:null,navLegs:[],startPickMode:false,activeGuideLeg:0,forceOsmRefresh:false,guidePassed:new Set(),servicePasses:new Map(),kmzBlob:null,gpsTrack:[],gpsTrackingDesired:false,roadPasses:{},restoring:false,kmzUploadGeneration:0};
+const state={uploadId:null,jobId:null,geojson:null,areaGeojson:null,summary:null,projectId:null,shareCode:null,workerId:1,watchId:null,current:null,completed:new Set(),segments:[],segmentLengths:[],layers:{},syncTimer:null,config:{gps_threshold_m:18,sync_interval_ms:5000},areaInfo:{},fieldGuideLeg:0,lastPosition:null,sessionToken:localStorage.getItem('pn_session')||'',user:null,navLegs:[],startPickMode:false,activeGuideLeg:0,forceOsmRefresh:false,guidePassed:new Set(),servicePasses:new Map(),kmzBlob:null,gpsTrack:[],gpsTrackingDesired:false,roadPasses:{},restoring:false,kmzUploadGeneration:0,osmRoadSegments:[],osmRoadArea:null,gpsTiles:new Set(),gpsTilesLoading:new Set(),gpsRoadGraph:null};
 const map=L.map('map').setView([35.7005,139.6925],16);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'© OpenStreetMap contributors'}).addTo(map);
 
@@ -54,8 +54,150 @@ function restoreServicePasses(rows){state.servicePasses=new Map((rows||[]).map((
 let saveSessionTimer=null;
 function saveFieldSessionSoon(){if(state.restoring)return;clearTimeout(saveSessionTimer);saveSessionTimer=setTimeout(saveFieldSession,300)}
 async function saveFieldSession(){await sessionPut({savedAt:Date.now(),kmzBlob:state.kmzBlob,geojson:state.geojson,areaGeojson:state.areaGeojson,summary:state.summary,areaInfo:state.areaInfo,areas:[...($('area')?.options||[])].map(o=>o.value),selectedArea:$('area')?.value||'',startLat:$('lat')?.value||'',startLon:$('lon')?.value||'',workerId:state.workerId,completed:[...state.completed],fieldGuideLeg:state.fieldGuideLeg,activeGuideLeg:state.activeGuideLeg,guidePassed:[...state.guidePassed],servicePasses:serialiseServicePasses(),gpsTrack:state.gpsTrack,roadPasses:state.roadPasses,gpsTrackingDesired:state.gpsTrackingDesired})}
-function drawGpsTrack(){if(state.layers.gpsTrack)state.layers.gpsTrack.remove();state.layers.gpsTrack=null;if(state.gpsTrack.length<2)return;state.layers.gpsTrack=L.polyline(state.gpsTrack.map(p=>[p.lat,p.lon]),{color:'#7c3aed',weight:6,opacity:.9,lineCap:'round'}).addTo(map);state.layers.gpsTrack.bringToFront?.()}
-async function restoreFieldSession(){const generation=state.kmzUploadGeneration;const x=await sessionGet();if(!x||generation!==state.kmzUploadGeneration)return;state.restoring=true;state.kmzBlob=x.kmzBlob||null;state.geojson=x.geojson||null;state.areaGeojson=x.areaGeojson||null;state.summary=x.summary||null;state.areaInfo=x.areaInfo||{};state.workerId=+x.workerId||1;state.completed=new Set(x.completed||[]);state.fieldGuideLeg=+x.fieldGuideLeg||0;state.activeGuideLeg=+x.activeGuideLeg||0;state.guidePassed=new Set(x.guidePassed||[]);restoreServicePasses(x.servicePasses);state.gpsTrack=Array.isArray(x.gpsTrack)?x.gpsTrack:[];state.roadPasses=x.roadPasses||{};state.gpsTrackingDesired=!!x.gpsTrackingDesired;if(x.startLat&&x.startLon)setStartPoint(+x.startLat,+x.startLon);if(x.areas?.length){$('area').innerHTML=x.areas.map(a=>`<option>${escapeHtml(a)}</option>`).join('');$('area').disabled=false;$('build').disabled=false;$('refreshOsm').disabled=false;if(x.selectedArea)$('area').value=x.selectedArea}if(state.areaGeojson){renderAreaBoundaries(false);renderHouseholdInfo()}if(state.geojson){renderGeneratedMap();renderMetrics();renderDownloads();prepareWorkerUI();loadWorker(state.workerId,{preserveProgress:true});restoreServicePasses(x.servicePasses);state.guidePassed=new Set(x.guidePassed||[]);drawGuideProgress();drawGpsTrack();status('status','前回の作業状態を自動復元しました。','success')}drawGpsTrack();state.restoring=false;/* KMZ auto-upload intentionally disabled: user initiated uploads are authoritative. */if(state.gpsTrackingDesired)setTimeout(()=>startGpsTracking(true),500)}
+// Match display track against the full cached OSM highway network, not the planned route.
+// The original measurements are retained; roadPasses continue to use raw GPS evidence.
+async function loadGpsRoadNetwork(area){
+  if(!area)return;
+  if(state.osmRoadArea===area&&state.osmRoadSegments.length)return;
+  let saved=await getBrowserOsmCache(area);
+  if(!saved?.blob){await saveServerOsmCacheToBrowser(area);saved=await getBrowserOsmCache(area)}
+  if(!saved?.blob)return;
+  try{
+    const data=JSON.parse(await saved.blob.text());
+    const segments=[];
+    for(const way of data.elements||[]){
+      if(way.type!=='way'||!way.tags?.highway||!Array.isArray(way.geometry))continue;
+      if(['motorway','motorway_link','trunk','trunk_link','proposed','construction','raceway'].includes(way.tags.highway))continue;
+      const pts=way.geometry;
+      for(let i=1;i<pts.length;i++){
+        const a=pts[i-1],b=pts[i];
+        if(![a.lat,a.lon,b.lat,b.lon].every(Number.isFinite))continue;
+        const len=haversine(a.lat,a.lon,b.lat,b.lon);
+        if(len<.3||len>300)continue;
+        segments.push({a,b,len,way:way.id,index:i});
+      }
+    }
+    state.osmRoadSegments=segments;state.osmRoadArea=area;state.gpsRoadGraph=null;
+    drawGpsTrack();
+  }catch(e){console.warn('OSM GPS道路網の読み込み失敗',e)}
+}
+// Fetch surrounding OSM streets as the walker moves beyond the original area.
+// Tiles are about 400 m wide; failures are retried on a later GPS observation.
+async function ensureGpsRoadCoverage(lat,lon){
+  const x=Math.floor(lon*250),y=Math.floor(lat*250),key=`${x}:${y}`;
+  if(state.gpsTiles.has(key)||state.gpsTilesLoading.has(key))return;
+  state.gpsTilesLoading.add(key);
+  try{
+    const data=await api(`/api/gps-roads?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`);
+    const existing=new Set(state.osmRoadSegments.map(s=>`${s.way}:${s.index}`));
+    for(const way of data.elements||[]){
+      if(way.type!=='way'||!way.tags?.highway||!Array.isArray(way.geometry))continue;
+      if(['motorway','motorway_link','trunk','trunk_link','proposed','construction','raceway'].includes(way.tags.highway))continue;
+      for(let i=1;i<way.geometry.length;i++){
+        const a=way.geometry[i-1],b=way.geometry[i],id=`${way.id}:${i}`;
+        if(existing.has(id)||![a.lat,a.lon,b.lat,b.lon].every(Number.isFinite))continue;
+        const len=haversine(a.lat,a.lon,b.lat,b.lon);
+        if(len>.3&&len<300){state.osmRoadSegments.push({a,b,len,way:way.id,index:i});existing.add(id)}
+      }
+    }
+    state.gpsRoadGraph=null;
+    state.gpsTiles.add(key);
+    drawGpsTrack();
+  }catch(e){console.warn('周辺GPS道路データの取得失敗',e)}
+  finally{state.gpsTilesLoading.delete(key)}
+}
+// Build a walkable graph of OSM segment endpoints, including shared intersections.
+function gpsGraph(){
+  if(state.gpsRoadGraph)return state.gpsRoadGraph;
+  const nodes=new Map(),edges=new Map();
+  const key=p=>`${p.lat.toFixed(6)},${p.lon.toFixed(6)}`;
+  function add(a,b,d){if(!edges.has(a))edges.set(a,[]);edges.get(a).push({to:b,d})}
+  for(const seg of state.osmRoadSegments){const a=key(seg.a),b=key(seg.b);nodes.set(a,seg.a);nodes.set(b,seg.b);add(a,b,seg.len);add(b,a,seg.len)}
+  return state.gpsRoadGraph={nodes,edges,key};
+}
+// Bounded Dijkstra: reject implausible detours rather than inventing a walked route.
+function gpsRoadPath(a,b,maxMeters){
+  const graph=gpsGraph(),start=[graph.key(a.seg.a),graph.key(a.seg.b)],end=new Set([graph.key(b.seg.a),graph.key(b.seg.b)]);
+  const dist=new Map(),prev=new Map(),queue=[];
+  for(let i=0;i<2;i++){const k=start[i],d=i===0?a.t*a.seg.len:(1-a.t)*a.seg.len;if(d<(dist.get(k)??Infinity)){dist.set(k,d);queue.push([d,k])}}
+  let found=null;
+  for(let steps=0;queue.length&&steps<1800;steps++){
+    queue.sort((x,y)=>y[0]-x[0]);const [d,k]=queue.pop();if(d!==dist.get(k))continue;
+    if(d>maxMeters)break;
+    if(end.has(k)){const tail=k===graph.key(b.seg.a)?b.t*b.seg.len:(1-b.t)*b.seg.len;if(d+tail<=maxMeters){found=k;break}}
+    for(const e of graph.edges.get(k)||[]){const nd=d+e.d;if(nd<=(maxMeters)&&nd<(dist.get(e.to)??Infinity)){dist.set(e.to,nd);prev.set(e.to,k);queue.push([nd,e.to])}}
+  }
+  if(found===null)return null;
+  const route=[];for(let k=found;k!==undefined;k=prev.get(k))route.push(graph.nodes.get(k));route.reverse();
+  return route.map(p=>[p.lat,p.lon]);
+}
+function gpsCandidates(p){
+  const accuracy=Number(p.accuracy);
+  const radius=Math.min(22,Math.max(9,Number.isFinite(accuracy)?accuracy*1.1:14));
+  const candidates=[];
+  for(const seg of state.osmRoadSegments){
+    // Fast bounding-box filter before metric projection.
+    const dy=radius/110540,dx=radius/(111320*Math.max(.2,Math.cos(p.lat*Math.PI/180)));
+    if(p.lat<Math.min(seg.a.lat,seg.b.lat)-dy||p.lat>Math.max(seg.a.lat,seg.b.lat)+dy||p.lon<Math.min(seg.a.lon,seg.b.lon)-dx||p.lon>Math.max(seg.a.lon,seg.b.lon)+dx)continue;
+    const q=projectRoadPoint(p.lat,p.lon,[[seg.a.lon,seg.a.lat],[seg.b.lon,seg.b.lat]]);
+    if(q.d>radius)continue;
+    candidates.push({lat:seg.a.lat+(seg.b.lat-seg.a.lat)*q.t,lon:seg.a.lon+(seg.b.lon-seg.a.lon)*q.t,d:q.d,seg,t:q.t});
+  }
+  candidates.sort((a,b)=>a.d-b.d);
+  return candidates.slice(0,7);
+}
+function gpsDisplayTrack(){
+  const parts=[];let part=[],prev=null;
+  const flush=()=>{if(part.length>1)parts.push(part);part=[];prev=null};
+  for(const p of state.gpsTrack){
+    if(!Number.isFinite(p.lat)||!Number.isFinite(p.lon))continue;
+    if(Number.isFinite(p.accuracy)&&p.accuracy>65){flush();continue}
+    const candidates=gpsCandidates(p);
+    let chosen=null,bestScore=Infinity;
+    for(const c of candidates){
+      let score=c.d;
+      if(prev){
+        const rawDist=haversine(prev.raw.lat,prev.raw.lon,p.lat,p.lon);
+        const roadDist=haversine(prev.lat,prev.lon,c.lat,c.lon);
+        const dt=Math.max(1,(p.t-prev.raw.t)/1000);
+        score+=Math.abs(roadDist-rawDist)*.55;
+        if(roadDist>Math.max(25,dt*3.5+15))score+=35;
+        if(prev.seg?.way===c.seg.way)score-=3;
+        if(prev.seg&&prev.seg.way!==c.seg.way&&roadDist>12)score+=7;
+      }
+      if(score<bestScore){bestScore=score;chosen=c}
+    }
+    const point=chosen&&bestScore<35?{lat:chosen.lat,lon:chosen.lon,seg:chosen.seg,raw:p}: {lat:p.lat,lon:p.lon,seg:null,raw:p};
+    if(prev){
+      const d=haversine(prev.lat,prev.lon,point.lat,point.lon);
+      const dt=(p.t-prev.raw.t)/1000;
+      if(dt>0&&(d/dt>5.5||d>80)){flush()}
+      else if(d<2.5)continue;
+      else if(prev.seg&&point.seg){
+        // Follow the connected road graph through intersections, not a chord across buildings.
+        // Break the line if the roads are not connected near this transition.
+        const x=prev.seg,y=point.seg;
+        const connected=x.way===y.way||
+          [[x.a,y.a],[x.a,y.b],[x.b,y.a],[x.b,y.b]].some(([a,b])=>haversine(a.lat,a.lon,b.lat,b.lon)<3);
+        if(!connected&&d>14){
+          const rawDist=haversine(prev.raw.lat,prev.raw.lon,p.lat,p.lon);
+          const route=gpsRoadPath(prev,point,Math.min(240,Math.max(35,rawDist*2.1+18)));
+          if(route){part.push(...route)}else flush();
+        }
+      }
+    }
+    part.push([point.lat,point.lon]);prev=point;
+  }
+  flush();return parts;
+}
+function drawGpsTrack(){
+  if(state.layers.gpsTrack)state.layers.gpsTrack.remove();state.layers.gpsTrack=null;
+  if(state.gpsTrack.length<2)return;
+  state.layers.gpsTrack=L.polyline(gpsDisplayTrack(),{color:'#7c3aed',weight:6,opacity:.9,lineCap:'round',lineJoin:'round'}).addTo(map);
+  state.layers.gpsTrack.bringToFront?.();
+}
+
+async function restoreFieldSession(){const generation=state.kmzUploadGeneration;const x=await sessionGet();if(!x||generation!==state.kmzUploadGeneration)return;state.restoring=true;state.kmzBlob=x.kmzBlob||null;state.geojson=x.geojson||null;state.areaGeojson=x.areaGeojson||null;state.summary=x.summary||null;state.areaInfo=x.areaInfo||{};state.workerId=+x.workerId||1;state.completed=new Set(x.completed||[]);state.fieldGuideLeg=+x.fieldGuideLeg||0;state.activeGuideLeg=+x.activeGuideLeg||0;state.guidePassed=new Set(x.guidePassed||[]);restoreServicePasses(x.servicePasses);state.gpsTrack=Array.isArray(x.gpsTrack)?x.gpsTrack:[];state.roadPasses=x.roadPasses||{};state.gpsTrackingDesired=!!x.gpsTrackingDesired;if(x.startLat&&x.startLon)setStartPoint(+x.startLat,+x.startLon);if(x.areas?.length){$('area').innerHTML=x.areas.map(a=>`<option>${escapeHtml(a)}</option>`).join('');$('area').disabled=false;$('build').disabled=false;$('refreshOsm').disabled=false;if(x.selectedArea)$('area').value=x.selectedArea}if(state.areaGeojson){renderAreaBoundaries(false);renderHouseholdInfo()}if(state.geojson){renderGeneratedMap();renderMetrics();renderDownloads();prepareWorkerUI();loadWorker(state.workerId,{preserveProgress:true});restoreServicePasses(x.servicePasses);state.guidePassed=new Set(x.guidePassed||[]);drawGuideProgress();drawGpsTrack();status('status','前回の作業状態を自動復元しました。','success')}drawGpsTrack();loadGpsRoadNetwork(x.selectedArea||$('area')?.value);state.restoring=false;/* KMZ auto-upload intentionally disabled: user initiated uploads are authoritative. */if(state.gpsTrackingDesired)setTimeout(()=>startGpsTracking(true),500)}
 
 async function osmDb(){return new Promise((resolve,reject)=>{const req=indexedDB.open('posting-navigator-osm',1);req.onupgradeneeded=()=>{if(!req.result.objectStoreNames.contains('snapshots'))req.result.createObjectStore('snapshots')};req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error)})}
 async function getBrowserOsmCache(area){if(!area||!('indexedDB'in window))return null;try{const db=await osmDb();return await new Promise((resolve,reject)=>{const tx=db.transaction('snapshots','readonly'),req=tx.objectStore('snapshots').get(area);req.onsuccess=()=>resolve(req.result||null);req.onerror=()=>reject(req.error)})}catch{return null}}
@@ -202,7 +344,7 @@ async function runRouteBuild(forceRefresh=false){
     await restoreBrowserOsmCache(area);
     const j=await api('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({upload_id:state.uploadId,area,workers:1,start_lat:$('lat').value,start_lon:$('lon').value,offline_fallback:$('fallback').checked,force_osm_refresh:!!forceRefresh})});
     state.jobId=j.job_id;state.geojson=j.geojson;state.summary=j.summary;renderGeneratedMap();renderMetrics();renderDownloads();
-    const saved=await saveServerOsmCacheToBrowser(area);await updateOsmCacheStatus();
+    const saved=await saveServerOsmCacheToBrowser(area);await loadGpsRoadNetwork(area);await updateOsmCacheStatus();
     const mode=j.summary.data_mode||'osm';
     const modeText=mode==='osm'?'最新OSM':mode==='osm-cache'?'保存済みOSM':mode==='osm-cache-fallback'?'保存済みOSM（更新失敗のため既存データ）':mode;
     status('status',`生成完了（道路データ: ${modeText}${saved?'・端末保存済み':''}）`,'success');
@@ -357,7 +499,7 @@ $('joinProject').onclick=async()=>{const code=$('joinCode').value.trim().toUpper
 function prepareWorkerUI(){const features=workerFeatures();const options=features.map(f=>`<option value="${f.properties.worker_id}">${escapeHtml(f.properties.name||`担当${f.properties.worker_id}`)}</option>`).join('');$('fieldWorker').innerHTML=options;if(options)state.workerId=+($('fieldWorker').value||1)}
 $('fieldWorker').onchange=()=>loadWorker(+$('fieldWorker').value);
 function workerFeatures(){return (state.geojson?.features||[]).filter(f=>f.properties?.kind==='worker_route').sort((a,b)=>a.properties.worker_id-b.properties.worker_id)}
-function loadWorker(workerId,{preserveProgress=false}={}){state.workerId=workerId;const feat=workerFeatures().find(f=>+f.properties.worker_id===workerId);if(!feat)return;const geom=feat.geometry||{},parts=geom.type==='MultiLineString'?(geom.coordinates||[]):[(geom.coordinates||[])];state.segments=[];state.segmentLengths=[];for(const coords of parts){for(let i=0;i<coords.length-1;i++){state.segments.push([coords[i],coords[i+1]]);state.segmentLengths.push(haversine(coords[i][1],coords[i][0],coords[i+1][1],coords[i+1][0]))}}const key=progressKey();if(!preserveProgress){let saved=[];try{saved=JSON.parse(localStorage.getItem(key)||'[]')}catch{}state.completed=new Set(saved);state.fieldGuideLeg=0}state.lastPosition=null;$('fieldWorkerName').textContent=feat.properties.name||`担当${workerId}`;drawFieldRoute();updateFieldProgress();nextRouteInstruction();pullProgress()}
+function loadWorker(workerId,{preserveProgress=false}={}){state.workerId=workerId;const feat=workerFeatures().find(f=>+f.properties.worker_id===workerId);if(!feat)return;const geom=feat.geometry||{},parts=geom.type==='MultiLineString'?(geom.coordinates||[]):[(geom.coordinates||[])];state.segments=[];state.segmentLengths=[];for(const coords of parts){for(let i=0;i<coords.length-1;i++){state.segments.push([coords[i],coords[i+1]]);state.segmentLengths.push(haversine(coords[i][1],coords[i][0],coords[i+1][1],coords[i+1][0]))}}const key=progressKey();if(!preserveProgress){let saved=[];try{saved=JSON.parse(localStorage.getItem(key)||'[]')}catch{}state.completed=new Set(saved);state.fieldGuideLeg=0}state.lastPosition=null;$('fieldWorkerName').textContent=feat.properties.name||`担当${workerId}`;drawFieldRoute();drawGpsTrack();updateFieldProgress();nextRouteInstruction();pullProgress()}
 function progressKey(){return `pn_progress_${state.projectId||'local'}_${state.workerId}`}
 function segmentPhysicalKey(s){const q=p=>`${(+p[0]).toFixed(6)},${(+p[1]).toFixed(6)}`;const a=q(s[0]),b=q(s[1]);return a<b?`${a}|${b}`:`${b}|${a}`}
 function roadPassRecord(key){return state.roadPasses[key]||(state.roadPasses[key]={dirs:[],evidence:{}})}
@@ -375,7 +517,7 @@ function startGpsTracking(restored=false){if(!navigator.geolocation){status('gps
 $('gpsStart').onclick=()=>startGpsTracking(false);
 $('gpsStop').onclick=()=>{state.gpsTrackingDesired=false;if(state.watchId!==null)navigator.geolocation.clearWatch(state.watchId);state.watchId=null;$('gpsStart').disabled=false;$('gpsStop').disabled=true;saveFieldSessionSoon();status('gpsStatus','GPS追跡を停止しました。')};
 function angleDiff(a,b){return Math.abs(((a-b+540)%360)-180)}
-function onPosition(p){const lat=p.coords.latitude,lon=p.coords.longitude,heading=Number.isFinite(p.coords.heading)?p.coords.heading:null;state.current={lat,lon,accuracy:p.coords.accuracy,heading};const prev=state.gpsTrack.at(-1);if(!prev||haversine(prev.lat,prev.lon,lat,lon)>=2){state.gpsTrack.push({lat,lon,t:Date.now(),accuracy:p.coords.accuracy});if(state.gpsTrack.length>12000)state.gpsTrack=state.gpsTrack.slice(-12000);drawGpsTrack();saveGpsSoon();saveFieldSessionSoon();}if(state.layers.gps)state.layers.gps.remove();state.layers.gps=L.marker([lat,lon],{icon:L.divIcon({className:'',html:'<div class="gps-marker"></div>',iconSize:[18,18],iconAnchor:[9,9]})}).addTo(map);if($('autoFollow').checked)map.panTo([lat,lon]);const observed=observeRoadMotion(state.lastPosition,{lat,lon},p.coords.accuracy);if(observed){drawFieldRoute();updateFieldProgress();pushProgress()}advanceFieldGuide();nextRouteInstruction();state.lastPosition={lat,lon};status('gpsStatus',`GPS追跡中\n精度: ±${Math.round(p.coords.accuracy)}m / 案内: ${Math.min((state.fieldGuideLeg||0)+1,state.navLegs.length)}番`,'success')}
+function onPosition(p){const lat=p.coords.latitude,lon=p.coords.longitude;ensureGpsRoadCoverage(lat,lon);const heading=Number.isFinite(p.coords.heading)?p.coords.heading:null;state.current={lat,lon,accuracy:p.coords.accuracy,heading};const prev=state.gpsTrack.at(-1);if(!prev||haversine(prev.lat,prev.lon,lat,lon)>=2){state.gpsTrack.push({lat,lon,t:Date.now(),accuracy:p.coords.accuracy});if(state.gpsTrack.length>12000)state.gpsTrack=state.gpsTrack.slice(-12000);drawGpsTrack();saveGpsSoon();saveFieldSessionSoon();}if(state.layers.gps)state.layers.gps.remove();state.layers.gps=L.marker([lat,lon],{icon:L.divIcon({className:'',html:'<div class="gps-marker"></div>',iconSize:[18,18],iconAnchor:[9,9]})}).addTo(map);if($('autoFollow').checked)map.panTo([lat,lon]);const observed=observeRoadMotion(state.lastPosition,{lat,lon},p.coords.accuracy);if(observed){drawFieldRoute();updateFieldProgress();pushProgress()}advanceFieldGuide();nextRouteInstruction();state.lastPosition={lat,lon};status('gpsStatus',`GPS追跡中\n精度: ±${Math.round(p.coords.accuracy)}m / 案内: ${Math.min((state.fieldGuideLeg||0)+1,state.navLegs.length)}番`,'success')}
 $('resetProgress').onclick=()=>{if(!confirm('この担当の進捗を0%に戻しますか？'))return;state.completed.clear();state.roadPasses={};drawFieldRoute();updateFieldProgress();pushProgress()};
 
 async function pushProgress(){if(!state.projectId)return;const m=updateFieldProgress();try{await api(`/api/projects/${state.projectId}/progress/${state.workerId}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({completed_segments:[...state.completed],completed_distance_m:m.done,lat:state.current?.lat,lon:state.current?.lon})})}catch(e){console.warn(e)}}
@@ -390,7 +532,7 @@ function setupGoogleLogin(){const cid=state.config.google_client_id;if(!cid){$('
 function renderLogin(){if(state.user){$('loginBox').innerHTML=`<button id="logout" class="ghost">${escapeHtml(state.user.name||state.user.email)} ▾</button>`;$('logout').onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'})}catch{}state.sessionToken='';state.user=null;localStorage.removeItem('pn_session');$('myProjectsBox').classList.add('hidden');renderLogin()}}else if(window.google){$('loginBox').innerHTML='<div id="googleBtn"></div>';google.accounts.id.renderButton($('googleBtn'),{theme:'outline',size:'medium',text:'signin_with',shape:'pill'})}}
 
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'){saveFieldSession();gpsTrackPut();}else{drawGpsTrack();if(state.gpsTrackingDesired&&state.watchId===null)startGpsTracking(true)}});window.addEventListener('pagehide',()=>{saveFieldSession();gpsTrackPut()});
-let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.20',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
+let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.23',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
 
 function haversine(lat1,lon1,lat2,lon2){const R=6371000,p=Math.PI/180,dLat=(lat2-lat1)*p,dLon=(lon2-lon1)*p,a=Math.sin(dLat/2)**2+Math.cos(lat1*p)*Math.cos(lat2*p)*Math.sin(dLon/2)**2;return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))}
 function pointSegmentMeters(lat,lon,lat1,lon1,lat2,lon2){const mLat=(lat+lat1+lat2)/3*Math.PI/180,x=(v)=>v*Math.PI/180*6371000*Math.cos(mLat),y=(v)=>v*Math.PI/180*6371000;const px=x(lon),py=y(lat),ax=x(lon1),ay=y(lat1),bx=x(lon2),by=y(lat2),dx=bx-ax,dy=by-ay;const t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/(dx*dx+dy*dy||1)));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy))}
