@@ -1,10 +1,20 @@
-const CACHE='posting-navigator-v1.9.23';
-const APP=['./','index.html','style.css','app.js','config.js','manifest.webmanifest','offline.html','icons/icon-192.png','icons/icon-512.png'];
-self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(APP)).then(()=>self.skipWaiting())));
-self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));
-self.addEventListener('fetch',e=>{
-  if(e.request.method!=='GET')return;
-  const u=new URL(e.request.url);
-  if(u.pathname.includes('/api/')||u.pathname.includes('/download/')){e.respondWith(fetch(e.request));return;}
-  e.respondWith(fetch(e.request).then(r=>{const copy=r.clone();caches.open(CACHE).then(c=>c.put(e.request,copy));return r}).catch(()=>caches.match(e.request).then(r=>r||caches.match('offline.html'))));
+const CACHE='posting-navigator-v1.9.25';
+const APP=['style.css?v=1.9.25','app.js?v=1.9.25','config.js?v=1.9.25','manifest.webmanifest','offline.html','icons/icon-192.png','icons/icon-512.png'];
+self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(APP)).then(()=>self.skipWaiting())));
+self.addEventListener('activate',event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key.startsWith('posting-navigator-')&&key!==CACHE).map(key=>caches.delete(key)))).then(()=>self.clients.claim())));
+self.addEventListener('fetch',event=>{
+  const request=event.request;
+  if(request.method!=='GET')return;
+  const url=new URL(request.url);
+  if(url.origin!==self.location.origin)return;
+  if(url.pathname.includes('/api/')||url.pathname.includes('/download/'))return;
+  // HTML and version checks must always hit the network; never serve stale UI.
+  if(request.mode==='navigate'||url.pathname.endsWith('/index.html')||url.searchParams.has('_version_check')){
+    event.respondWith(fetch(new Request(request,{cache:'no-store'})).catch(()=>caches.match('offline.html')));
+    return;
+  }
+  event.respondWith(fetch(request).then(response=>{
+    if(response.ok){const copy=response.clone();event.waitUntil(caches.open(CACHE).then(cache=>cache.put(request,copy)));}
+    return response;
+  }).catch(()=>caches.match(request).then(cached=>cached||caches.match('offline.html'))));
 });

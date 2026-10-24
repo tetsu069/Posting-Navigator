@@ -105,3 +105,8 @@ Androidで実KMZ multipart送信が Failed to fetch となる場合、File.array
 
 ### v1.9.21 GPS display filtering
 GPS display now rejects low-quality fixes and implausible jumps, suppresses small jitter and conservatively snaps near existing generated-route road segments. Raw GPS data remains stored; delivery-progress evidence uses raw measurements. This is NOT full OSM map matching and may not follow roads outside the generated route.
+
+### v1.9.25 更新確認
+- バージョンを v1.9.25 に統一し、CSS/JSにバージョン付きURLを設定。
+- Service WorkerはHTMLのナビゲーションをネットワーク優先・非キャッシュに変更。
+- 右上に「最新版を確認」を追加。公開中のバージョンを確認でき、GPS記録中に自動再読込しない。
