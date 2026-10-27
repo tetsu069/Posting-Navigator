@@ -110,3 +110,9 @@ GPS display now rejects low-quality fixes and implausible jumps, suppresses smal
 - バージョンを v1.9.25 に統一し、CSS/JSにバージョン付きURLを設定。
 - Service WorkerはHTMLのナビゲーションをネットワーク優先・非キャッシュに変更。
 - 右上に「最新版を確認」を追加。公開中のバージョンを確認でき、GPS記録中に自動再読込しない。
+
+## v1.9.26 GPS street trace correction
+- Correctly include projected GPS positions and road vertices in the shortest-path reconstruction, including transitions between segments of the same OSM way.
+- Render confirmed street-following segments as continuous purple lines.
+- Do not fall back to a single raw GPS polyline when matching is partial; unmatched observations are shown as small purple dots instead of false straight roads.
+- Road matching still depends on OSM road coverage, GPS quality, and availability of the roads API. Real-device validation remains necessary.
