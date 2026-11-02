@@ -21,6 +21,7 @@ function saveGpsSoon(){clearTimeout(gpsSaveTimer);gpsSaveTimer=setTimeout(()=>gp
 async function clearSavedGpsTrack(){
   clearTimeout(gpsSaveTimer);clearTimeout(saveSessionTimer);
   state.gpsTrack=[];
+  if(window.PostingNative)window.PostingNative.clearTrack();
   drawGpsTrack();
   if(!('indexedDB' in window))throw Error('この端末では保存領域を利用できません');
   const db=await sessionDb();
@@ -192,26 +193,34 @@ function gpsDisplayTrack(){
   }
   flush();return {matched,unmatched};
 }
+// Always show recorded movement, even if OSM is unavailable or matching fails.
+// A dashed faint line is *unmatched GPS evidence*, not a claimed street route.
+let gpsRenderTimer=null;
+function scheduleGpsTrackDraw(){
+  if(gpsRenderTimer!==null)return;
+  gpsRenderTimer=setTimeout(()=>{gpsRenderTimer=null;drawGpsTrack()},900);
+}
 function drawGpsTrack(){
-  for(const name of ['gpsTrack','gpsTrackPoint','gpsUnmatched']){
+  for(const name of ['gpsTrack','gpsTrackPoint','gpsUnmatched','gpsRawTrack']){
     state.layers[name]?.remove();state.layers[name]=null;
   }
   const raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon)).map(p=>[p.lat,p.lon]);
   if(!raw.length)return;
   if(raw.length===1){state.layers.gpsTrackPoint=L.circleMarker(raw[0],{radius:6,color:'#7c3aed',fillColor:'#7c3aed',fillOpacity:1,weight:2}).addTo(map);return}
+  // Keep the entire original GPS record visible. Unmatched portions are explicitly dashed.
+  state.layers.gpsRawTrack=L.polyline(raw,{color:'#a78bfa',weight:3,opacity:.7,dashArray:'4 9',lineCap:'round'}).addTo(map);
+  if(!state.osmRoadSegments.length)return;
   let result={matched:[],unmatched:raw};
-  try{result=gpsDisplayTrack()}catch(e){console.warn('GPS道路補正失敗',e)}
+  try{
+    // Full historical rematching on each GPS update is prohibitively expensive on phones.
+    // Match the latest window while the original trace remains fully visible.
+    const original=state.gpsTrack;
+    if(original.length>350)state.gpsTrack=original.slice(-350);
+    try{result=gpsDisplayTrack()}finally{state.gpsTrack=original}
+  }catch(e){console.warn('GPS道路補正失敗',e)}
   if(result.matched.length){
-    state.layers.gpsTrack=L.polyline(result.matched,{color:'#7c3aed',weight:6,opacity:.9,lineCap:'round',lineJoin:'round'}).addTo(map);
+    state.layers.gpsTrack=L.polyline(result.matched,{color:'#7c3aed',weight:6,opacity:.95,lineCap:'round',lineJoin:'round'}).addTo(map);
     state.layers.gpsTrack.bringToFront?.();
-  }
-  // Sparse purple dots indicate where the road network could not be verified.
-  // Do not connect them with invented chords or replace good road paths with raw lines.
-  if(result.unmatched.length||!result.matched.length){
-    const dots=result.matched.length?result.unmatched:raw;
-    state.layers.gpsUnmatched=L.layerGroup(dots.filter((_,i)=>i%Math.max(1,Math.ceil(dots.length/400))===0).map(x=>
-      L.circleMarker(x,{radius:3,color:'#a78bfa',fillColor:'#a78bfa',fillOpacity:.75,weight:1})
-    )).addTo(map);
   }
 }
 async function restoreFieldSession(){const generation=state.kmzUploadGeneration;const x=await sessionGet();if(!x||generation!==state.kmzUploadGeneration)return;state.restoring=true;state.kmzBlob=x.kmzBlob||null;state.geojson=x.geojson||null;state.areaGeojson=x.areaGeojson||null;state.summary=x.summary||null;state.areaInfo=x.areaInfo||{};state.workerId=+x.workerId||1;state.completed=new Set(x.completed||[]);state.fieldGuideLeg=+x.fieldGuideLeg||0;state.activeGuideLeg=+x.activeGuideLeg||0;state.guidePassed=new Set(x.guidePassed||[]);restoreServicePasses(x.servicePasses);state.gpsTrack=Array.isArray(x.gpsTrack)?x.gpsTrack:[];state.roadPasses=x.roadPasses||{};state.gpsTrackingDesired=!!x.gpsTrackingDesired;if(x.startLat&&x.startLon)setStartPoint(+x.startLat,+x.startLon);if(x.areas?.length){$('area').innerHTML=x.areas.map(a=>`<option>${escapeHtml(a)}</option>`).join('');$('area').disabled=false;$('build').disabled=false;$('refreshOsm').disabled=false;if(x.selectedArea)$('area').value=x.selectedArea}if(state.areaGeojson){renderAreaBoundaries(false);renderHouseholdInfo()}if(state.geojson){renderGeneratedMap();renderMetrics();renderDownloads();prepareWorkerUI();loadWorker(state.workerId,{preserveProgress:true});restoreServicePasses(x.servicePasses);state.guidePassed=new Set(x.guidePassed||[]);drawGuideProgress();drawGpsTrack();status('status','前回の作業状態を自動復元しました。','success')}drawGpsTrack();loadGpsRoadNetwork(x.selectedArea||$('area')?.value);state.restoring=false;/* KMZ auto-upload intentionally disabled: user initiated uploads are authoritative. */if(state.gpsTrackingDesired)setTimeout(()=>startGpsTracking(true),500)}
@@ -530,11 +539,11 @@ function drawNextWorkerArrow(){if(state.layers.directions)state.layers.direction
 function updateFieldProgress(){const done=[...state.completed].reduce((s,i)=>s+(state.segmentLengths[i]||0),0), total=state.segmentLengths.reduce((a,b)=>a+b,0),pct=total?done/total*100:0;$('fieldPercent').textContent=`${pct.toFixed(1)}%`;$('fieldDistance').textContent=`${(done/1000).toFixed(2)} / ${(total/1000).toFixed(2)} km`;localStorage.setItem(progressKey(),JSON.stringify([...state.completed]));updateHouseholdProgress(pct);if(!state.restoring)saveFieldSessionSoon();return{done,total,pct}}
 $('gpsThreshold').oninput=()=>$('gpsThresholdText').textContent=$('gpsThreshold').value;
 
-function startGpsTracking(restored=false){if(!navigator.geolocation){status('gpsStatus','この端末ではGPSを利用できません。','error');return}state.gpsTrackingDesired=true;if(state.watchId!==null)return;state.watchId=navigator.geolocation.watchPosition(onPosition,e=>status('gpsStatus',`GPSエラー: ${e.message}`,'error'),{enableHighAccuracy:true,maximumAge:1500,timeout:20000});$('gpsStart').disabled=true;$('gpsStop').disabled=false;saveFieldSessionSoon();status('gpsStatus',restored?'GPS追跡を再開しました。紫線が実歩行軌跡です。':'GPS追跡中。紫線が実歩行軌跡です。','success')}
+function startGpsTracking(restored=false){if(window.PostingNative){state.gpsTrackingDesired=true;state.watchId=-1;window.PostingNative.startTracking();$('gpsStart').disabled=true;$('gpsStop').disabled=false;saveFieldSessionSoon();status('gpsStatus','AndroidバックグラウンドGPSを開始します。通知を確認してください。','success');return}if(!navigator.geolocation){status('gpsStatus','この端末ではGPSを利用できません。','error');return}state.gpsTrackingDesired=true;if(state.watchId!==null)return;state.watchId=navigator.geolocation.watchPosition(onPosition,e=>status('gpsStatus',`GPSエラー: ${e.message}`,'error'),{enableHighAccuracy:true,maximumAge:1500,timeout:20000});$('gpsStart').disabled=true;$('gpsStop').disabled=false;saveFieldSessionSoon();status('gpsStatus',restored?'GPS追跡を再開しました。紫線が実歩行軌跡です。':'GPS追跡中。紫線が実歩行軌跡です。','success')}
 $('gpsStart').onclick=()=>startGpsTracking(false);
-$('gpsStop').onclick=()=>{state.gpsTrackingDesired=false;if(state.watchId!==null)navigator.geolocation.clearWatch(state.watchId);state.watchId=null;$('gpsStart').disabled=false;$('gpsStop').disabled=true;saveFieldSessionSoon();status('gpsStatus','GPS追跡を停止しました。')};
+$('gpsStop').onclick=()=>{if(window.PostingNative)window.PostingNative.stopTracking();state.gpsTrackingDesired=false;if(state.watchId!==null&&state.watchId!==-1)navigator.geolocation.clearWatch(state.watchId);state.watchId=null;$('gpsStart').disabled=false;$('gpsStop').disabled=true;saveFieldSessionSoon();status('gpsStatus','GPS追跡を停止しました。')};
 function angleDiff(a,b){return Math.abs(((a-b+540)%360)-180)}
-function onPosition(p){const lat=p.coords.latitude,lon=p.coords.longitude;ensureGpsRoadCoverage(lat,lon);const heading=Number.isFinite(p.coords.heading)?p.coords.heading:null;state.current={lat,lon,accuracy:p.coords.accuracy,heading};const prev=state.gpsTrack.at(-1);if(!prev||haversine(prev.lat,prev.lon,lat,lon)>=2){state.gpsTrack.push({lat,lon,t:Date.now(),accuracy:p.coords.accuracy});if(state.gpsTrack.length>12000)state.gpsTrack=state.gpsTrack.slice(-12000);drawGpsTrack();saveGpsSoon();saveFieldSessionSoon();}if(state.layers.gps)state.layers.gps.remove();state.layers.gps=L.marker([lat,lon],{icon:L.divIcon({className:'',html:'<div class="gps-marker"></div>',iconSize:[18,18],iconAnchor:[9,9]})}).addTo(map);if($('autoFollow').checked)map.panTo([lat,lon]);const observed=observeRoadMotion(state.lastPosition,{lat,lon},p.coords.accuracy);if(observed){drawFieldRoute();updateFieldProgress();pushProgress()}advanceFieldGuide();nextRouteInstruction();state.lastPosition={lat,lon};status('gpsStatus',`GPS追跡中 / 記録: ${state.gpsTrack.length}点\n精度: ±${Math.round(p.coords.accuracy)}m / 案内: ${Math.min((state.fieldGuideLeg||0)+1,state.navLegs.length)}番`,'success')}
+function onPosition(p){const lat=p.coords.latitude,lon=p.coords.longitude;ensureGpsRoadCoverage(lat,lon);const heading=Number.isFinite(p.coords.heading)?p.coords.heading:null;state.current={lat,lon,accuracy:p.coords.accuracy,heading};const prev=state.gpsTrack.at(-1);if(!prev||haversine(prev.lat,prev.lon,lat,lon)>=2){state.gpsTrack.push({lat,lon,t:p.timestamp||Date.now(),accuracy:p.coords.accuracy});if(state.gpsTrack.length>12000)state.gpsTrack=state.gpsTrack.slice(-12000);scheduleGpsTrackDraw();saveGpsSoon();saveFieldSessionSoon();}if(state.layers.gps)state.layers.gps.remove();state.layers.gps=L.marker([lat,lon],{icon:L.divIcon({className:'',html:'<div class="gps-marker"></div>',iconSize:[18,18],iconAnchor:[9,9]})}).addTo(map);if($('autoFollow').checked)map.panTo([lat,lon]);const observed=observeRoadMotion(state.lastPosition,{lat,lon},p.coords.accuracy);if(observed){drawFieldRoute();updateFieldProgress();pushProgress()}advanceFieldGuide();nextRouteInstruction();state.lastPosition={lat,lon};status('gpsStatus',`GPS追跡中 / 記録: ${state.gpsTrack.length}点\n精度: ±${Math.round(p.coords.accuracy)}m / 案内: ${Math.min((state.fieldGuideLeg||0)+1,state.navLegs.length)}番`,'success')}
 $('resetProgress').onclick=()=>{if(!confirm('この担当の進捗を0%に戻しますか？'))return;state.completed.clear();state.roadPasses={};drawFieldRoute();updateFieldProgress();pushProgress()};
 
 async function pushProgress(){if(!state.projectId)return;const m=updateFieldProgress();try{await api(`/api/projects/${state.projectId}/progress/${state.workerId}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({completed_segments:[...state.completed],completed_distance_m:m.done,lat:state.current?.lat,lon:state.current?.lon})})}catch(e){console.warn(e)}}
@@ -549,7 +558,7 @@ function setupGoogleLogin(){const cid=state.config.google_client_id;if(!cid){$('
 function renderLogin(){if(state.user){$('loginBox').innerHTML=`<button id="logout" class="ghost">${escapeHtml(state.user.name||state.user.email)} ▾</button>`;$('logout').onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'})}catch{}state.sessionToken='';state.user=null;localStorage.removeItem('pn_session');$('myProjectsBox').classList.add('hidden');renderLogin()}}else if(window.google){$('loginBox').innerHTML='<div id="googleBtn"></div>';google.accounts.id.renderButton($('googleBtn'),{theme:'outline',size:'medium',text:'signin_with',shape:'pill'})}}
 
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'){saveFieldSession();gpsTrackPut();}else{drawGpsTrack();if(state.gpsTrackingDesired&&state.watchId===null)startGpsTracking(true)}});window.addEventListener('pagehide',()=>{saveFieldSession();gpsTrackPut()});
-let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.26',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
+let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.28',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
 
 function haversine(lat1,lon1,lat2,lon2){const R=6371000,p=Math.PI/180,dLat=(lat2-lat1)*p,dLon=(lon2-lon1)*p,a=Math.sin(dLat/2)**2+Math.cos(lat1*p)*Math.cos(lat2*p)*Math.sin(dLon/2)**2;return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))}
 function pointSegmentMeters(lat,lon,lat1,lon1,lat2,lon2){const mLat=(lat+lat1+lat2)/3*Math.PI/180,x=(v)=>v*Math.PI/180*6371000*Math.cos(mLat),y=(v)=>v*Math.PI/180*6371000;const px=x(lon),py=y(lat),ax=x(lon1),ay=y(lat1),bx=x(lon2),by=y(lat2),dx=bx-ax,dy=by-ay;const t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/(dx*dx+dy*dy||1)));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy))}
@@ -564,8 +573,40 @@ function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':
   const gpsSaved=await gpsTrackGet();
   if(Array.isArray(gpsSaved?.points)&&(gpsSaved.cleared||gpsSaved.points.length>=state.gpsTrack.length)){state.gpsTrack=gpsSaved.points;drawGpsTrack()}
   if(state.gpsTrack.length)await gpsTrackPut(); // migrate tracks saved by earlier versions
+  if(window.PostingNative){
+    try{
+      const points=JSON.parse(window.PostingNative.getTrack());
+      if(Array.isArray(points)&&points.length){
+        const known=new Set(state.gpsTrack.map(p=>String(p.t)));
+        for(const p of points){if(Number.isFinite(p.lat)&&Number.isFinite(p.lon)&&!known.has(String(p.t))){state.gpsTrack.push(p);known.add(String(p.t))}}
+        state.gpsTrack.sort((a,b)=>a.t-b.t);
+        if(state.gpsTrack.length>12000)state.gpsTrack=state.gpsTrack.slice(-12000);
+        drawGpsTrack();await gpsTrackPut();
+      }
+      if(window.PostingNative.isTracking()){state.gpsTrackingDesired=true;state.watchId=-1;$('gpsStart').disabled=true;$('gpsStop').disabled=false}
+    }catch(e){console.warn('Android GPS記録の復元失敗',e)}
+  }
   await loadConfig();
 })();
+window.postingNavigatorNativeSync=async function(){
+  if(!window.PostingNative)return;
+  try{
+    const pts=JSON.parse(window.PostingNative.getTrack());
+    const known=new Set(state.gpsTrack.map(p=>String(p.t)));
+    let changed=false;
+    for(const p of pts){if(Number.isFinite(p.lat)&&Number.isFinite(p.lon)&&!known.has(String(p.t))){state.gpsTrack.push(p);known.add(String(p.t));changed=true}}
+    if(changed){state.gpsTrack.sort((a,b)=>a.t-b.t);if(state.gpsTrack.length>12000)state.gpsTrack=state.gpsTrack.slice(-12000);drawGpsTrack();saveGpsSoon();saveFieldSessionSoon()}
+    const running=window.PostingNative.isTracking();
+    state.gpsTrackingDesired=running;state.watchId=running?-1:null;
+    $('gpsStart').disabled=running;$('gpsStop').disabled=!running;
+    if(running)status('gpsStatus',`Android GPS記録中 / 記録: ${state.gpsTrack.length}点`,'success');
+  }catch(e){console.warn('Android GPS再同期失敗',e)}
+};
+window.postingNavigatorNativePosition=function(p){
+  if(!p||!Number.isFinite(p.lat)||!Number.isFinite(p.lon))return;
+  // Do not infer traversed route while history is replayed; only live fixes reach onPosition.
+  onPosition({coords:{latitude:p.lat,longitude:p.lon,accuracy:p.accuracy||20,heading:p.heading??null},timestamp:p.t});
+};
 
 // Explicit version verification: never auto-reload during active GPS recording.
 (function(){
@@ -587,7 +628,7 @@ function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':
       const match=html.match(/class="badge"[^>]*>v(\d+\.\d+\.\d+)</);
       if(!match)throw new Error('公開中のバージョンを取得できません');
       const published=match[1];
-      if(published==='1.9.26'){
+      if(published==='1.9.28'){
         button.textContent='v'+published+' 確認済み';
       }else{
         button.textContent='公開中 v'+published;

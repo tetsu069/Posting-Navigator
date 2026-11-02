@@ -116,3 +116,7 @@ GPS display now rejects low-quality fixes and implausible jumps, suppresses smal
 - Render confirmed street-following segments as continuous purple lines.
 - Do not fall back to a single raw GPS polyline when matching is partial; unmatched observations are shown as small purple dots instead of false straight roads.
 - Road matching still depends on OSM road coverage, GPS quality, and availability of the roads API. Real-device validation remains necessary.
+
+
+## Android v1.9.28
+See `android/README-ANDROID.md` for background GPS source project and build instructions.
