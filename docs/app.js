@@ -144,7 +144,7 @@ function gpsRoadPath(a,b,maxMeters){
 }
 function gpsCandidates(p){
   const accuracy=Number(p.accuracy);
-  const radius=Math.min(22,Math.max(9,Number.isFinite(accuracy)?accuracy*1.1:14));
+  const radius=Math.min(48,Math.max(14,Number.isFinite(accuracy)?accuracy*1.35:24));
   const candidates=[];
   for(const seg of state.osmRoadSegments){
     // Fast bounding-box filter before metric projection.
@@ -155,7 +155,7 @@ function gpsCandidates(p){
     candidates.push({lat:seg.a.lat+(seg.b.lat-seg.a.lat)*q.t,lon:seg.a.lon+(seg.b.lon-seg.a.lon)*q.t,d:q.d,seg,t:q.t});
   }
   candidates.sort((a,b)=>a.d-b.d);
-  return candidates.slice(0,7);
+  return candidates.slice(0,5);
 }
 // Return only genuine connected street paths. Never turn unmatched fixes into
 // a solid straight line through buildings. Unmatched samples are drawn separately.
@@ -165,28 +165,30 @@ function gpsDisplayTrack(){
   for(const p of state.gpsTrack){
     if(!Number.isFinite(p.lat)||!Number.isFinite(p.lon))continue;
     const candidates=gpsCandidates(p);
-    let chosen=null,best=Infinity;
+    let chosen=null,chosenRoad=null,best=Infinity;
+    const dt=prev?Math.max(1,(p.t-prev.raw.t)/1000):0;
+    const rawDist=prev?haversine(prev.raw.lat,prev.raw.lon,p.lat,p.lon):0;
+    // Prefer a connected road over a closer but disconnected parallel street.
     for(const c of candidates){
-      let score=c.d;
+      let score=c.d,road=null;
       if(prev?.candidate){
-        const rawDist=haversine(prev.raw.lat,prev.raw.lon,p.lat,p.lon);
-        const direct=haversine(prev.candidate.lat,prev.candidate.lon,c.lat,c.lon);
-        const dt=Math.max(1,(p.t-prev.raw.t)/1000);
-        score+=Math.abs(direct-rawDist)*.35;
-        if(direct>Math.max(35,dt*3.5+18))score+=25;
-        if(prev.candidate.seg.way===c.seg.way)score-=3;
+        const maxMeters=Math.min(600,Math.max(45,rawDist*2.6+35,dt*3.5+20));
+        road=gpsRoadPath(prev.candidate,c,maxMeters);
+        if(road){
+          let length=0;
+          for(let i=1;i<road.length;i++)length+=haversine(road[i-1][0],road[i-1][1],road[i][0],road[i][1]);
+          score+=Math.abs(length-rawDist)*.22;
+          if(length>Math.max(45,rawDist*2.8+30,dt*4+25))score+=40;
+        }else score+=32;
+        if(prev.candidate.seg.way===c.seg.way)score-=2;
       }
-      if(score<best){best=score;chosen=c}
+      if(score<best){best=score;chosen=c;chosenRoad=road}
     }
-    if(!chosen||best>35){flush();unmatched.push([p.lat,p.lon]);prev=null;continue}
+    if(!chosen||best>65){flush();unmatched.push([p.lat,p.lon]);prev=null;continue}
     if(prev?.candidate){
-      const dt=Math.max(1,(p.t-prev.raw.t)/1000);
-      const rawDist=haversine(prev.raw.lat,prev.raw.lon,p.lat,p.lon);
-      const maxMeters=Math.min(350,Math.max(30,rawDist*2.3+22,dt*2.5+10));
-      const road=gpsRoadPath(prev.candidate,chosen,maxMeters);
-      if(road&&rawDist/dt<7){
-        if(!part.length)part.push(road[0]);
-        part.push(...road.slice(1));
+      if(chosenRoad&&rawDist/dt<8){
+        if(!part.length)part.push(chosenRoad[0]);
+        part.push(...chosenRoad.slice(1));
       }else{flush();unmatched.push([p.lat,p.lon])}
     }
     prev={candidate:chosen,raw:p};
@@ -207,8 +209,9 @@ function drawGpsTrack(){
   const raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon)).map(p=>[p.lat,p.lon]);
   if(!raw.length)return;
   if(raw.length===1){state.layers.gpsTrackPoint=L.circleMarker(raw[0],{radius:6,color:'#7c3aed',fillColor:'#7c3aed',fillOpacity:1,weight:2}).addTo(map);return}
-  // Keep the entire original GPS record visible. Unmatched portions are explicitly dashed.
-  state.layers.gpsRawTrack=L.polyline(raw,{color:'#a78bfa',weight:3,opacity:.7,dashArray:'4 9',lineCap:'round'}).addTo(map);
+  // Keep the raw GPS record visible as a continuous, thin reference line.
+  // It is not a verified road path; verified matched roads are drawn thicker above it.
+  state.layers.gpsRawTrack=L.polyline(raw,{color:'#a78bfa',weight:2,opacity:.55,lineCap:'round',lineJoin:'round'}).addTo(map);
   if(!state.osmRoadSegments.length)return;
   let result={matched:[],unmatched:raw};
   try{
@@ -558,7 +561,7 @@ function setupGoogleLogin(){const cid=state.config.google_client_id;if(!cid){$('
 function renderLogin(){if(state.user){$('loginBox').innerHTML=`<button id="logout" class="ghost">${escapeHtml(state.user.name||state.user.email)} ▾</button>`;$('logout').onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'})}catch{}state.sessionToken='';state.user=null;localStorage.removeItem('pn_session');$('myProjectsBox').classList.add('hidden');renderLogin()}}else if(window.google){$('loginBox').innerHTML='<div id="googleBtn"></div>';google.accounts.id.renderButton($('googleBtn'),{theme:'outline',size:'medium',text:'signin_with',shape:'pill'})}}
 
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'){saveFieldSession();gpsTrackPut();}else{drawGpsTrack();if(state.gpsTrackingDesired&&state.watchId===null)startGpsTracking(true)}});window.addEventListener('pagehide',()=>{saveFieldSession();gpsTrackPut()});
-let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.28',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
+let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.29',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
 
 function haversine(lat1,lon1,lat2,lon2){const R=6371000,p=Math.PI/180,dLat=(lat2-lat1)*p,dLon=(lon2-lon1)*p,a=Math.sin(dLat/2)**2+Math.cos(lat1*p)*Math.cos(lat2*p)*Math.sin(dLon/2)**2;return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))}
 function pointSegmentMeters(lat,lon,lat1,lon1,lat2,lon2){const mLat=(lat+lat1+lat2)/3*Math.PI/180,x=(v)=>v*Math.PI/180*6371000*Math.cos(mLat),y=(v)=>v*Math.PI/180*6371000;const px=x(lon),py=y(lat),ax=x(lon1),ay=y(lat1),bx=x(lon2),by=y(lat2),dx=bx-ax,dy=by-ay;const t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/(dx*dx+dy*dy||1)));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy))}
@@ -628,7 +631,7 @@ window.postingNavigatorNativePosition=function(p){
       const match=html.match(/class="badge"[^>]*>v(\d+\.\d+\.\d+)</);
       if(!match)throw new Error('公開中のバージョンを取得できません');
       const published=match[1];
-      if(published==='1.9.28'){
+      if(published==='1.9.29'){
         button.textContent='v'+published+' 確認済み';
       }else{
         button.textContent='公開中 v'+published;
