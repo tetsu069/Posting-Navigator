@@ -78,7 +78,7 @@ async function loadGpsRoadNetwork(area){
         segments.push({a,b,len,way:way.id,index:i});
       }
     }
-    state.osmRoadSegments=segments;state.osmRoadArea=area;state.gpsRoadGraph=null;
+    state.osmRoadSegments=segments;state.osmRoadArea=area;state.gpsRoadGraph=null;gpsSpatialIndex=null;
     drawGpsTrack();
   }catch(e){console.warn('OSM GPS道路網の読み込み失敗',e)}
 }
@@ -101,7 +101,7 @@ async function ensureGpsRoadCoverage(lat,lon){
         if(len>.3&&len<300){state.osmRoadSegments.push({a,b,len,way:way.id,index:i});existing.add(id)}
       }
     }
-    state.gpsRoadGraph=null;
+    state.gpsRoadGraph=null;gpsSpatialIndex=null;
     state.gpsTiles.add(key);
     drawGpsTrack();
   }catch(e){console.warn('周辺GPS道路データの取得失敗',e)}
@@ -124,7 +124,7 @@ function gpsRoadPath(a,b,maxMeters){
   const coord=p=>[p.lat,p.lon];
   const graph=gpsGraph(),key=graph.key;
   if(a.seg.way===b.seg.way&&a.seg.index===b.seg.index)
-    return [coord(a),coord(b)];
+    return Math.abs(a.t-b.t)*a.seg.len<=maxMeters?[coord(a),coord(b)]:null;
   const starts=[{k:key(a.seg.a),d:a.t*a.seg.len},{k:key(a.seg.b),d:(1-a.t)*a.seg.len}];
   const ends=new Map([[key(b.seg.a),b.t*b.seg.len],[key(b.seg.b),(1-b.t)*b.seg.len]]);
   const dist=new Map(),previous=new Map(),queue=[];
@@ -142,61 +142,111 @@ function gpsRoadPath(a,b,maxMeters){
   const middle=[];for(let k=finish;k!==undefined;k=previous.get(k))middle.push(coord(graph.nodes.get(k)));
   middle.reverse();return [coord(a),...middle,coord(b)];
 }
+// Candidate roads are indexed in ~90m geographic cells; avoid scanning every
+// road segment on every GPS fix. Rebuilt whenever the OSM graph changes.
+let gpsSpatialIndex=null,gpsSpatialSource=null;
+function gpsRoadSpatialIndex(){
+  if(gpsSpatialIndex&&gpsSpatialSource===state.gpsRoadGraph)return gpsSpatialIndex;
+  const cell=.0008,grid=new Map();
+  for(const seg of state.osmRoadSegments){
+    const y0=Math.floor(Math.min(seg.a.lat,seg.b.lat)/cell),y1=Math.floor(Math.max(seg.a.lat,seg.b.lat)/cell);
+    const x0=Math.floor(Math.min(seg.a.lon,seg.b.lon)/cell),x1=Math.floor(Math.max(seg.a.lon,seg.b.lon)/cell);
+    for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){
+      const k=`${y}:${x}`;if(!grid.has(k))grid.set(k,[]);grid.get(k).push(seg);
+    }
+  }
+  gpsSpatialSource=state.gpsRoadGraph;return gpsSpatialIndex={grid,cell};
+}
+// Android's native recorder does not call the browser onPosition handler while
+// the screen is off. Load road tiles for the restored route as well as live GPS.
+function ensureRecordedGpsRoadCoverage(){
+  const pts=state.gpsTrack,selected=[];
+  for(let i=Math.max(0,pts.length-500);i<pts.length;i++){
+    const p=pts[i],last=selected.at(-1);
+    if(!last||haversine(last.lat,last.lon,p.lat,p.lon)>230)selected.push(p);
+  }
+  // Limit simultaneous network requests; the rest are retried at the next sync.
+  for(const p of selected.slice(-12))ensureGpsRoadCoverage(p.lat,p.lon);
+}
 function gpsCandidates(p){
   const accuracy=Number(p.accuracy);
-  const radius=Math.min(48,Math.max(14,Number.isFinite(accuracy)?accuracy*1.35:24));
-  const candidates=[];
-  for(const seg of state.osmRoadSegments){
-    // Fast bounding-box filter before metric projection.
-    const dy=radius/110540,dx=radius/(111320*Math.max(.2,Math.cos(p.lat*Math.PI/180)));
-    if(p.lat<Math.min(seg.a.lat,seg.b.lat)-dy||p.lat>Math.max(seg.a.lat,seg.b.lat)+dy||p.lon<Math.min(seg.a.lon,seg.b.lon)-dx||p.lon>Math.max(seg.a.lon,seg.b.lon)+dx)continue;
-    const q=projectRoadPoint(p.lat,p.lon,[[seg.a.lon,seg.a.lat],[seg.b.lon,seg.b.lat]]);
-    if(q.d>radius)continue;
-    candidates.push({lat:seg.a.lat+(seg.b.lat-seg.a.lat)*q.t,lon:seg.a.lon+(seg.b.lon-seg.a.lon)*q.t,d:q.d,seg,t:q.t});
-  }
-  candidates.sort((a,b)=>a.d-b.d);
-  return candidates.slice(0,5);
-}
-// Return only genuine connected street paths. Never turn unmatched fixes into
-// a solid straight line through buildings. Unmatched samples are drawn separately.
-function gpsDisplayTrack(){
-  const matched=[],unmatched=[];let part=[],prev=null;
-  const flush=()=>{if(part.length>=2)matched.push(part);part=[]};
-  for(const p of state.gpsTrack){
-    if(!Number.isFinite(p.lat)||!Number.isFinite(p.lon))continue;
-    const candidates=gpsCandidates(p);
-    let chosen=null,chosenRoad=null,best=Infinity;
-    const dt=prev?Math.max(1,(p.t-prev.raw.t)/1000):0;
-    const rawDist=prev?haversine(prev.raw.lat,prev.raw.lon,p.lat,p.lon):0;
-    // Prefer a connected road over a closer but disconnected parallel street.
-    for(const c of candidates){
-      let score=c.d,road=null;
-      if(prev?.candidate){
-        const maxMeters=Math.min(600,Math.max(45,rawDist*2.6+35,dt*3.5+20));
-        road=gpsRoadPath(prev.candidate,c,maxMeters);
-        if(road){
-          let length=0;
-          for(let i=1;i<road.length;i++)length+=haversine(road[i-1][0],road[i-1][1],road[i][0],road[i][1]);
-          score+=Math.abs(length-rawDist)*.22;
-          if(length>Math.max(45,rawDist*2.8+30,dt*4+25))score+=40;
-        }else score+=32;
-        if(prev.candidate.seg.way===c.seg.way)score-=2;
+  const radius=Math.min(65,Math.max(18,Number.isFinite(accuracy)?accuracy*1.5:30));
+  const {grid,cell}=gpsRoadSpatialIndex(),seen=new Set(),candidates=[];
+  const dy=radius/110540,dx=radius/(111320*Math.max(.2,Math.cos(p.lat*Math.PI/180)));
+  for(let y=Math.floor((p.lat-dy)/cell);y<=Math.floor((p.lat+dy)/cell);y++)
+    for(let x=Math.floor((p.lon-dx)/cell);x<=Math.floor((p.lon+dx)/cell);x++)
+      for(const seg of grid.get(`${y}:${x}`)||[]){
+        if(seen.has(seg))continue;seen.add(seg);
+        const q=projectRoadPoint(p.lat,p.lon,[[seg.a.lon,seg.a.lat],[seg.b.lon,seg.b.lat]]);
+        if(q.d>radius)continue;
+        candidates.push({lat:seg.a.lat+(seg.b.lat-seg.a.lat)*q.t,lon:seg.a.lon+(seg.b.lon-seg.a.lon)*q.t,d:q.d,seg,t:q.t});
       }
-      if(score<best){best=score;chosen=c;chosenRoad=road}
-    }
-    if(!chosen||best>65){flush();unmatched.push([p.lat,p.lon]);prev=null;continue}
-    if(prev?.candidate){
-      if(chosenRoad&&rawDist/dt<8){
-        if(!part.length)part.push(chosenRoad[0]);
-        part.push(...chosenRoad.slice(1));
-      }else{flush();unmatched.push([p.lat,p.lon])}
-    }
-    prev={candidate:chosen,raw:p};
-  }
-  flush();return {matched,unmatched};
+  candidates.sort((a,b)=>a.d-b.d);
+  return candidates.slice(0,4);
 }
-// Always show recorded movement, even if OSM is unavailable or matching fails.
-// A dashed faint line is *unmatched GPS evidence*, not a claimed street route.
+function gpsPathLength(path){let n=0;for(let i=1;i<path.length;i++)n+=haversine(path[i-1][0],path[i-1][1],path[i][0],path[i][1]);return n}
+// A Viterbi-style temporal matcher: choose a sequence of connected streets,
+// not the nearest street independently at each sample. Restart after gaps.
+// Road geometry is the ONLY source for solid GPS track lines.
+function gpsDisplayTrack(){
+  const matched=[],unmatched=[],raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+  if(!raw.length||!state.osmRoadSegments.length)return {matched,unmatched:raw.map(p=>[p.lat,p.lon])};
+  const frames=[];let previous=null;
+  for(const p of raw){
+    // Sparse samples are kept; zero movement and noisy stationary fixes do not
+    // force arbitrary loops through nearby parallel roads.
+    const cs=gpsCandidates(p),frame={p,cs,states:[]};
+    const dt=previous?Math.max(.1,(p.t-previous.p.t)/1000):0;
+    const displacement=previous?haversine(previous.p.lat,previous.p.lon,p.lat,p.lon):0;
+    for(let j=0;j<cs.length;j++){
+      const c=cs[j],sigma=Math.max(8,Math.min(40,(Number(p.accuracy)||16)*.8));
+      const emission=(c.d/sigma)**2*5;
+      let best={score:emission,from:-1,path:null};
+      if(previous&&dt<150&&displacement<350){
+        best={score:Infinity,from:-1,path:null};
+        for(let k=0;k<previous.states.length;k++){
+          const prior=previous.states[k];if(!Number.isFinite(prior.score))continue;
+          const limit=Math.min(700,Math.max(55,displacement*2.7+40,dt*3+35));
+          const path=gpsRoadPath(previous.cs[k],c,limit);
+          if(!path)continue;
+          const distance=gpsPathLength(path);
+          const speed=distance/dt;
+          if(speed>7.5&&distance>35)continue;
+          const transition=Math.abs(distance-displacement)*.38+Math.max(0,distance-displacement*1.7-20)*.7;
+          const score=prior.score+emission+transition;
+          if(score<best.score)best={score,from:k,path};
+        }
+        // No connected road transition: start a new trace, never bridge by a line.
+        if(best.from<0){
+          const previousBest=Math.min(...previous.states.map(x=>x.score));
+          best={score:previousBest+emission+24,from:-1,path:null};
+        }
+      }
+      frame.states.push(best);
+    }
+    frames.push(frame);previous=frame;
+  }
+  // Backtrack independently from the end of each connected run. This prevents
+  // future samples from causing abrupt switches between parallel streets.
+  let i=frames.length-1;
+  while(i>=0){
+    const f=frames[i];
+    if(!f.states.length){unmatched.push([f.p.lat,f.p.lon]);i--;continue}
+    let j=f.states.reduce((best,v,k)=>v.score<f.states[best].score?k:best,0);
+    const parts=[];
+    while(i>=0&&j>=0){
+      const cur=frames[i],st=cur.states[j];
+      if(st.path&&st.from>=0)parts.push(st.path);
+      const next=st.from;i--;j=next;
+    }
+    if(parts.length){const joined=[];for(const path of parts.reverse()){
+      if(!joined.length)joined.push(...path);else joined.push(...path.slice(1));
+    }if(joined.length>1)matched.push(joined)}
+  }
+  return {matched:matched.reverse(),unmatched};
+}
+// Show ONLY graph-connected street geometry as a line. Never join raw GPS fixes
+// across buildings: a straight raw fallback was the cause of misleading traces.
 let gpsRenderTimer=null;
 function scheduleGpsTrackDraw(){
   if(gpsRenderTimer!==null)return;
@@ -206,25 +256,31 @@ function drawGpsTrack(){
   for(const name of ['gpsTrack','gpsTrackPoint','gpsUnmatched','gpsRawTrack']){
     state.layers[name]?.remove();state.layers[name]=null;
   }
-  const raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon)).map(p=>[p.lat,p.lon]);
+  const raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
   if(!raw.length)return;
-  if(raw.length===1){state.layers.gpsTrackPoint=L.circleMarker(raw[0],{radius:6,color:'#7c3aed',fillColor:'#7c3aed',fillOpacity:1,weight:2}).addTo(map);return}
-  // Keep the raw GPS record visible as a continuous, thin reference line.
-  // It is not a verified road path; verified matched roads are drawn thicker above it.
-  state.layers.gpsRawTrack=L.polyline(raw,{color:'#a78bfa',weight:2,opacity:.55,lineCap:'round',lineJoin:'round'}).addTo(map);
-  if(!state.osmRoadSegments.length)return;
-  let result={matched:[],unmatched:raw};
-  try{
-    // Full historical rematching on each GPS update is prohibitively expensive on phones.
-    // Match the latest window while the original trace remains fully visible.
-    const original=state.gpsTrack;
-    if(original.length>350)state.gpsTrack=original.slice(-350);
-    try{result=gpsDisplayTrack()}finally{state.gpsTrack=original}
-  }catch(e){console.warn('GPS道路補正失敗',e)}
-  if(result.matched.length){
-    state.layers.gpsTrack=L.polyline(result.matched,{color:'#7c3aed',weight:6,opacity:.95,lineCap:'round',lineJoin:'round'}).addTo(map);
-    state.layers.gpsTrack.bringToFront?.();
+  if(raw.length===1){state.layers.gpsTrackPoint=L.circleMarker([raw[0].lat,raw[0].lon],{radius:7,color:'#6d28d9',fillColor:'#7c3aed',fillOpacity:1,weight:2}).addTo(map);return}
+  let result={matched:[],unmatched:[]};
+  if(state.osmRoadSegments.length){
+    try{
+      // Matching a whole multi-hour trace on each GPS update stalls mobile devices.
+      const original=state.gpsTrack;
+      if(original.length>350)state.gpsTrack=original.slice(-350);
+      try{result=gpsDisplayTrack()}finally{state.gpsTrack=original}
+    }catch(e){console.warn('GPS道路補正失敗',e)}
   }
+  if(result.matched.length){
+    state.layers.gpsTrack=L.polyline(result.matched,{color:'#7c3aed',weight:8,opacity:1,lineCap:'round',lineJoin:'round'}).addTo(map);
+  }
+  // Unmatched samples remain visible as individual dots, NOT an invented
+  // straight route. Limit markers to keep Leaflet usable on Android.
+  const samples=raw.slice(-350);
+  const dots=L.layerGroup();
+  for(let i=0;i<samples.length;i+=Math.max(1,Math.ceil(samples.length/175))){
+    const p=samples[i];
+    L.circleMarker([p.lat,p.lon],{radius:3,color:'#a78bfa',fillColor:'#a78bfa',fillOpacity:.65,weight:0,interactive:false}).addTo(dots);
+  }
+  state.layers.gpsUnmatched=dots.addTo(map);
+  state.layers.gpsTrack?.bringToFront?.();
 }
 async function restoreFieldSession(){const generation=state.kmzUploadGeneration;const x=await sessionGet();if(!x||generation!==state.kmzUploadGeneration)return;state.restoring=true;state.kmzBlob=x.kmzBlob||null;state.geojson=x.geojson||null;state.areaGeojson=x.areaGeojson||null;state.summary=x.summary||null;state.areaInfo=x.areaInfo||{};state.workerId=+x.workerId||1;state.completed=new Set(x.completed||[]);state.fieldGuideLeg=+x.fieldGuideLeg||0;state.activeGuideLeg=+x.activeGuideLeg||0;state.guidePassed=new Set(x.guidePassed||[]);restoreServicePasses(x.servicePasses);state.gpsTrack=Array.isArray(x.gpsTrack)?x.gpsTrack:[];state.roadPasses=x.roadPasses||{};state.gpsTrackingDesired=!!x.gpsTrackingDesired;if(x.startLat&&x.startLon)setStartPoint(+x.startLat,+x.startLon);if(x.areas?.length){$('area').innerHTML=x.areas.map(a=>`<option>${escapeHtml(a)}</option>`).join('');$('area').disabled=false;$('build').disabled=false;$('refreshOsm').disabled=false;if(x.selectedArea)$('area').value=x.selectedArea}if(state.areaGeojson){renderAreaBoundaries(false);renderHouseholdInfo()}if(state.geojson){renderGeneratedMap();renderMetrics();renderDownloads();prepareWorkerUI();loadWorker(state.workerId,{preserveProgress:true});restoreServicePasses(x.servicePasses);state.guidePassed=new Set(x.guidePassed||[]);drawGuideProgress();drawGpsTrack();status('status','前回の作業状態を自動復元しました。','success')}drawGpsTrack();loadGpsRoadNetwork(x.selectedArea||$('area')?.value);state.restoring=false;/* KMZ auto-upload intentionally disabled: user initiated uploads are authoritative. */if(state.gpsTrackingDesired)setTimeout(()=>startGpsTracking(true),500)}
 
@@ -561,7 +617,7 @@ function setupGoogleLogin(){const cid=state.config.google_client_id;if(!cid){$('
 function renderLogin(){if(state.user){$('loginBox').innerHTML=`<button id="logout" class="ghost">${escapeHtml(state.user.name||state.user.email)} ▾</button>`;$('logout').onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'})}catch{}state.sessionToken='';state.user=null;localStorage.removeItem('pn_session');$('myProjectsBox').classList.add('hidden');renderLogin()}}else if(window.google){$('loginBox').innerHTML='<div id="googleBtn"></div>';google.accounts.id.renderButton($('googleBtn'),{theme:'outline',size:'medium',text:'signin_with',shape:'pill'})}}
 
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'){saveFieldSession();gpsTrackPut();}else{drawGpsTrack();if(state.gpsTrackingDesired&&state.watchId===null)startGpsTracking(true)}});window.addEventListener('pagehide',()=>{saveFieldSession();gpsTrackPut()});
-let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.29',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
+let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.32',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
 
 function haversine(lat1,lon1,lat2,lon2){const R=6371000,p=Math.PI/180,dLat=(lat2-lat1)*p,dLon=(lon2-lon1)*p,a=Math.sin(dLat/2)**2+Math.cos(lat1*p)*Math.cos(lat2*p)*Math.sin(dLon/2)**2;return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))}
 function pointSegmentMeters(lat,lon,lat1,lon1,lat2,lon2){const mLat=(lat+lat1+lat2)/3*Math.PI/180,x=(v)=>v*Math.PI/180*6371000*Math.cos(mLat),y=(v)=>v*Math.PI/180*6371000;const px=x(lon),py=y(lat),ax=x(lon1),ay=y(lat1),bx=x(lon2),by=y(lat2),dx=bx-ax,dy=by-ay;const t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/(dx*dx+dy*dy||1)));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy))}
@@ -584,7 +640,7 @@ function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':
         for(const p of points){if(Number.isFinite(p.lat)&&Number.isFinite(p.lon)&&!known.has(String(p.t))){state.gpsTrack.push(p);known.add(String(p.t))}}
         state.gpsTrack.sort((a,b)=>a.t-b.t);
         if(state.gpsTrack.length>12000)state.gpsTrack=state.gpsTrack.slice(-12000);
-        drawGpsTrack();await gpsTrackPut();
+        drawGpsTrack();await gpsTrackPut();ensureRecordedGpsRoadCoverage();
       }
       if(window.PostingNative.isTracking()){state.gpsTrackingDesired=true;state.watchId=-1;$('gpsStart').disabled=true;$('gpsStop').disabled=false}
     }catch(e){console.warn('Android GPS記録の復元失敗',e)}
@@ -598,7 +654,7 @@ window.postingNavigatorNativeSync=async function(){
     const known=new Set(state.gpsTrack.map(p=>String(p.t)));
     let changed=false;
     for(const p of pts){if(Number.isFinite(p.lat)&&Number.isFinite(p.lon)&&!known.has(String(p.t))){state.gpsTrack.push(p);known.add(String(p.t));changed=true}}
-    if(changed){state.gpsTrack.sort((a,b)=>a.t-b.t);if(state.gpsTrack.length>12000)state.gpsTrack=state.gpsTrack.slice(-12000);drawGpsTrack();saveGpsSoon();saveFieldSessionSoon()}
+    if(changed){state.gpsTrack.sort((a,b)=>a.t-b.t);if(state.gpsTrack.length>12000)state.gpsTrack=state.gpsTrack.slice(-12000);drawGpsTrack();saveGpsSoon();saveFieldSessionSoon();ensureRecordedGpsRoadCoverage()}
     const running=window.PostingNative.isTracking();
     state.gpsTrackingDesired=running;state.watchId=running?-1:null;
     $('gpsStart').disabled=running;$('gpsStop').disabled=!running;
@@ -631,7 +687,7 @@ window.postingNavigatorNativePosition=function(p){
       const match=html.match(/class="badge"[^>]*>v(\d+\.\d+\.\d+)</);
       if(!match)throw new Error('公開中のバージョンを取得できません');
       const published=match[1];
-      if(published==='1.9.29'){
+      if(published==='1.9.32'){
         button.textContent='v'+published+' 確認済み';
       }else{
         button.textContent='公開中 v'+published;

@@ -120,3 +120,14 @@ GPS display now rejects low-quality fixes and implausible jumps, suppresses smal
 
 ## Android v1.9.28
 See `android/README-ANDROID.md` for background GPS source project and build instructions.
+
+## v1.9.31 GPS軌跡表示の修正
+- GPS実測点を直線でつないだフォールバック表示を廃止。道路網で接続できた区間のみ太さ8pxの紫色実線で描画。
+- 道路未照合の測位点は小さな点として表示し、道路を横切る架空の歩行線を作らない。
+- GPS原データは保存し続ける。道路データが取得できない区間は実線にならない（精度の保証ではない）。
+
+
+## v1.9.32 GPS regression verification
+- Added scripts/test_gps_regression.js: six automated checks (intersection, disconnected roads, distance limits, dead-end return, missing OSM, supplied 123.gpx parsing).
+- Fixed same-segment GPS path to respect maxMeters.
+- NOTE: Android emulator and actual OSM road matching for 123.gpx were not tested in this environment; this release does not establish RouteHistory-equivalent accuracy.
