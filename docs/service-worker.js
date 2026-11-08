@@ -1,5 +1,5 @@
-const CACHE='posting-navigator-v1.9.32';
-const APP=['style.css?v=1.9.32','app.js?v=1.9.32','config.js?v=1.9.32','manifest.webmanifest','offline.html','icons/icon-192.png','icons/icon-512.png'];
+const CACHE='posting-navigator-v1.9.55';
+const APP=['style.css?v=1.9.37','app.js?v=1.9.55','config.js?v=1.9.37','manifest.webmanifest','offline.html','icons/icon-192.png','icons/icon-512.png'];
 self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(APP)).then(()=>self.skipWaiting())));
 self.addEventListener('activate',event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key.startsWith('posting-navigator-')&&key!==CACHE).map(key=>caches.delete(key)))).then(()=>self.clients.claim())));
 self.addEventListener('fetch',event=>{

@@ -75,7 +75,7 @@ async function loadGpsRoadNetwork(area){
         if(![a.lat,a.lon,b.lat,b.lon].every(Number.isFinite))continue;
         const len=haversine(a.lat,a.lon,b.lat,b.lon);
         if(len<.3||len>300)continue;
-        segments.push({a,b,len,way:way.id,index:i});
+        segments.push({a,b,len,way:way.id,index:i,layer:Number(way.tags.layer)||0,bridge:!!way.tags.bridge&&way.tags.bridge!=="no",tunnel:!!way.tags.tunnel&&way.tags.tunnel!=="no"});
       }
     }
     state.osmRoadSegments=segments;state.osmRoadArea=area;state.gpsRoadGraph=null;gpsSpatialIndex=null;
@@ -98,7 +98,7 @@ async function ensureGpsRoadCoverage(lat,lon){
         const a=way.geometry[i-1],b=way.geometry[i],id=`${way.id}:${i}`;
         if(existing.has(id)||![a.lat,a.lon,b.lat,b.lon].every(Number.isFinite))continue;
         const len=haversine(a.lat,a.lon,b.lat,b.lon);
-        if(len>.3&&len<300){state.osmRoadSegments.push({a,b,len,way:way.id,index:i});existing.add(id)}
+        if(len>.3&&len<300){state.osmRoadSegments.push({a,b,len,way:way.id,index:i,layer:Number(way.tags.layer)||0,bridge:!!way.tags.bridge&&way.tags.bridge!=="no",tunnel:!!way.tags.tunnel&&way.tags.tunnel!=="no"});existing.add(id)}
       }
     }
     state.gpsRoadGraph=null;gpsSpatialIndex=null;
@@ -113,8 +113,32 @@ function gpsGraph(){
   const nodes=new Map(),edges=new Map();
   const key=p=>`${p.lat.toFixed(6)},${p.lon.toFixed(6)}`;
   function add(a,b,d){if(!edges.has(a))edges.set(a,[]);edges.get(a).push({to:b,d})}
-  for(const seg of state.osmRoadSegments){const a=key(seg.a),b=key(seg.b);nodes.set(a,seg.a);nodes.set(b,seg.b);add(a,b,seg.len);add(b,a,seg.len)}
-  return state.gpsRoadGraph={nodes,edges,key};
+  const endpointRecords=[];
+  for(const seg of state.osmRoadSegments){
+    const a=key(seg.a),b=key(seg.b);nodes.set(a,seg.a);nodes.set(b,seg.b);add(a,b,seg.len);add(b,a,seg.len);
+    // Only genuine OSM way endpoints may be repaired: never snap a crossing
+    // in the middle of a bridge, tunnel, or ordinary road.
+    if(seg.index===1)endpointRecords.push({p:seg.a,k:a,seg});
+  }
+  // A way's last endpoint may not be index 1. Detect it from the supplied
+  // segments rather than assuming consecutive OSM IDs are present.
+  const lastByWay=new Map();
+  for(const seg of state.osmRoadSegments){const prev=lastByWay.get(seg.way);if(!prev||seg.index>prev.index)lastByWay.set(seg.way,seg)}
+  for(const seg of lastByWay.values())endpointRecords.push({p:seg.b,k:key(seg.b),seg});
+  const buckets=new Map(),cell=.000015;let repaired=0;
+  for(const e of endpointRecords){
+    const x=Math.floor(e.p.lon/cell),y=Math.floor(e.p.lat/cell);
+    for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+      for(const other of buckets.get(`${x+dx}:${y+dy}`)||[]){
+        if(e.seg.way===other.seg.way||e.k===other.k)continue;
+        if((e.seg.layer||0)!==(other.seg.layer||0)||!!e.seg.bridge!==!!other.seg.bridge||!!e.seg.tunnel!==!!other.seg.tunnel)continue;
+        const d=haversine(e.p.lat,e.p.lon,other.p.lat,other.p.lon);
+        if(d>0.15&&d<=0.8){add(e.k,other.k,d);add(other.k,e.k,d);repaired++}
+      }
+    }
+    const id=`${x}:${y}`;if(!buckets.has(id))buckets.set(id,[]);buckets.get(id).push(e);
+  }
+  return state.gpsRoadGraph={nodes,edges,key,endpointRepairs:repaired};
 }
 // Bounded Dijkstra: reject implausible detours rather than inventing a walked route.
 // Shortest connected road path between projected GPS fixes. Include both projected
@@ -170,7 +194,9 @@ function ensureRecordedGpsRoadCoverage(){
 }
 function gpsCandidates(p){
   const accuracy=Number(p.accuracy);
-  const radius=Math.min(65,Math.max(18,Number.isFinite(accuracy)?accuracy*1.5:30));
+  // Keep the usual search tight, but respect a device-reported poor fix.
+  // A capped radius prevents GPS outliers from snapping to distant roads.
+  const radius=Math.min(85,Math.max(18,Number.isFinite(accuracy)?accuracy*1.5:30));
   const {grid,cell}=gpsRoadSpatialIndex(),seen=new Set(),candidates=[];
   const dy=radius/110540,dx=radius/(111320*Math.max(.2,Math.cos(p.lat*Math.PI/180)));
   for(let y=Math.floor((p.lat-dy)/cell);y<=Math.floor((p.lat+dy)/cell);y++)
@@ -182,14 +208,22 @@ function gpsCandidates(p){
         candidates.push({lat:seg.a.lat+(seg.b.lat-seg.a.lat)*q.t,lon:seg.a.lon+(seg.b.lon-seg.a.lon)*q.t,d:q.d,seg,t:q.t});
       }
   candidates.sort((a,b)=>a.d-b.d);
-  return candidates.slice(0,4);
+  // Retain nearest alternatives and add distinct ways when parallel roads or
+  // intersections would otherwise fill every slot with one polyline's edges.
+  const chosen=candidates.slice(0,4),used=new Set(chosen.map(c=>c.seg.way));
+  for(const c of candidates){
+    if(chosen.length>=7)break;
+    if(!used.has(c.seg.way)){chosen.push(c);used.add(c.seg.way)}
+  }
+  for(const c of candidates){if(chosen.length>=7)break;if(!chosen.includes(c))chosen.push(c)}
+  return chosen.sort((a,b)=>a.d-b.d);
 }
 function gpsPathLength(path){let n=0;for(let i=1;i<path.length;i++)n+=haversine(path[i-1][0],path[i-1][1],path[i][0],path[i][1]);return n}
 // A Viterbi-style temporal matcher: choose a sequence of connected streets,
 // not the nearest street independently at each sample. Restart after gaps.
 // Road geometry is the ONLY source for solid GPS track lines.
-function gpsDisplayTrack(){
-  const matched=[],unmatched=[],raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+function gpsDisplayTrackLocal(){
+  const matched=[],unmatched=[],transitions=[],runs=[],raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
   if(!raw.length||!state.osmRoadSegments.length)return {matched,unmatched:raw.map(p=>[p.lat,p.lon])};
   const frames=[];let previous=null;
   for(const p of raw){
@@ -219,7 +253,7 @@ function gpsDisplayTrack(){
         // No connected road transition: start a new trace, never bridge by a line.
         if(best.from<0){
           const previousBest=Math.min(...previous.states.map(x=>x.score));
-          best={score:previousBest+emission+24,from:-1,path:null};
+          best={score:previousBest+emission+120,from:-1,path:null};
         }
       }
       frame.states.push(best);
@@ -243,7 +277,915 @@ function gpsDisplayTrack(){
       if(!joined.length)joined.push(...path);else joined.push(...path.slice(1));
     }if(joined.length>1)matched.push(joined)}
   }
-  return {matched:matched.reverse(),unmatched};
+  // A single valid road segment may contain several consecutive fixes even
+  // when the wider graph is incomplete. Render these local road-following runs.
+  // Do not connect points on different edges unless a graph path was found.
+  if(!matched.length){
+    let run=[];
+    for(let n=0;n<frames.length;n++){
+      const f=frames[n];
+      if(!f.cs.length){if(run.length>1)matched.push(run);run=[];continue}
+      const c=f.cs[0],prev=n?frames[n-1]:null,pc=prev?.cs?.[0];
+      const connected=pc&&pc.seg.way===c.seg.way&&pc.seg.index===c.seg.index&&
+        haversine(pc.lat,pc.lon,c.lat,c.lon)<80&&
+        (f.p.t-prev.p.t)<120000;
+      if(!connected){if(run.length>1)matched.push(run);run=[]}
+      run.push([c.lat,c.lon]);
+    }
+    if(run.length>1)matched.push(run);
+  }
+  // Adjacent connected paths are authoritative for display coverage. Preserve
+  // every successful transition instead of choosing between an entire global
+  // Viterbi run and a separate collection of local paths.
+  const local=[];
+  let current=[],lastCandidate=null,runStart=-1,runEnd=-1;
+  function flush(){if(current.length>1){local.push(current);runs.push({startFixIndex:runStart,endFixIndex:runEnd,vertices:current.length})}current=[];lastCandidate=null;runStart=-1;runEnd=-1}
+  for(let n=1;n<frames.length;n++){
+    const prev=frames[n-1],cur=frames[n];
+    const dt=(cur.p.t-prev.p.t)/1000;
+    const displacement=haversine(prev.p.lat,prev.p.lon,cur.p.lat,cur.p.lon);
+    if(!(dt>0&&dt<150&&displacement<350&&prev.cs.length&&cur.cs.length)){
+      transitions.push({fromFixIndex:n-1,toFixIndex:n,dtSeconds:dt,gpsMeters:displacement,reason:!(dt>0&&dt<150)?'time_gap':displacement>=350?'gps_jump':'no_candidates',previousCandidates:prev.cs.length,nextCandidates:cur.cs.length});flush();continue}
+    const limit=Math.min(700,Math.max(55,displacement*2.7+40,dt*3+35));
+    let best=null,bestScore=Infinity,bestStart=null,bestEnd=null,bestBridge=null;
+    // Evaluate continuity with the already rendered road at the shared GPS fix.
+    // Selecting the cheapest pair independently can oscillate between parallel
+    // roads and create artificial gaps even when a consistent pair exists.
+    for(const a of prev.cs)for(const b of cur.cs){
+      const path=gpsRoadPath(a,b,limit);
+      if(!path)continue;
+      const distance=gpsPathLength(path);
+      if(distance/dt>7.5&&distance>35)continue;
+      let bridge=null,bridgeDistance=0;
+      if(current.length&&lastCandidate){
+        const gap=haversine(lastCandidate.lat,lastCandidate.lon,a.lat,a.lon);
+        if(gap>1.5){
+          const bridgeLimit=Math.min(130,Math.max(45,gap*3+15));
+          if(gap>42)continue;
+          bridge=gpsRoadPath(lastCandidate,a,bridgeLimit);
+          if(!bridge)continue;
+          bridgeDistance=gpsPathLength(bridge);
+          if(bridgeDistance>bridgeLimit)continue;
+        }
+      }
+      const score=a.d+b.d+Math.abs(distance-displacement)*.5+bridgeDistance*1.25;
+      if(score<bestScore){bestScore=score;best=path;bestStart=a;bestEnd=b;bestBridge=bridge}
+    }
+    if(!best||best.length<2){transitions.push({fromFixIndex:n-1,toFixIndex:n,dtSeconds:dt,gpsMeters:displacement,reason:'no_valid_road_transition',previousCandidates:prev.cs.map(c=>({way:c.seg.way,index:c.seg.index,d:c.d})),nextCandidates:cur.cs.map(c=>({way:c.seg.way,index:c.seg.index,d:c.d}))});flush();continue}
+    // The candidate pair was already checked against the previous segment.
+    if(current.length&&bestBridge)current.push(...bestBridge.slice(1));
+    if(!current.length){current.push(...best);runStart=n-1}
+    else current.push(...best.slice(1));
+    runEnd=n;lastCandidate=bestEnd;
+  }
+  flush();
+  return {matched:local,unmatched,runs,transitions};
+}
+
+function gpsDisplayTrackLocalCoverage(continuityPenalty=0){
+  const matched=[],unmatched=[],transitions=[],runs=[],intervals=[],raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+  if(!raw.length||!state.osmRoadSegments.length)return {matched,unmatched:raw.map(p=>[p.lat,p.lon])};
+  const frames=[];let previous=null;
+  for(const p of raw){
+    // Sparse samples are kept; zero movement and noisy stationary fixes do not
+    // force arbitrary loops through nearby parallel roads.
+    const cs=gpsCandidates(p),frame={p,cs,states:[]};
+    const dt=previous?Math.max(.1,(p.t-previous.p.t)/1000):0;
+    const displacement=previous?haversine(previous.p.lat,previous.p.lon,p.lat,p.lon):0;
+    for(let j=0;j<cs.length;j++){
+      const c=cs[j],sigma=Math.max(8,Math.min(40,(Number(p.accuracy)||16)*.8));
+      const emission=(c.d/sigma)**2*5;
+      let best={score:emission,from:-1,path:null};
+      if(previous&&dt<150&&displacement<350){
+        best={score:Infinity,from:-1,path:null};
+        for(let k=0;k<previous.states.length;k++){
+          const prior=previous.states[k];if(!Number.isFinite(prior.score))continue;
+          const limit=Math.min(700,Math.max(55,displacement*2.7+40,dt*3+35));
+          const path=gpsRoadPath(previous.cs[k],c,limit);
+          if(!path)continue;
+          const distance=gpsPathLength(path);
+          const speed=distance/dt;
+          if(speed>7.5&&distance>35)continue;
+          const transition=Math.abs(distance-displacement)*.38+Math.max(0,distance-displacement*1.7-20)*.7;
+          const score=prior.score+emission+transition;
+          if(score<best.score)best={score,from:k,path};
+        }
+        // No connected road transition: start a new trace, never bridge by a line.
+        if(best.from<0){
+          const previousBest=Math.min(...previous.states.map(x=>x.score));
+          best={score:previousBest+emission+120,from:-1,path:null};
+        }
+      }
+      frame.states.push(best);
+    }
+    frames.push(frame);previous=frame;
+  }
+  // Backtrack independently from the end of each connected run. This prevents
+  // future samples from causing abrupt switches between parallel streets.
+  let i=frames.length-1;
+  while(i>=0){
+    const f=frames[i];
+    if(!f.states.length){unmatched.push([f.p.lat,f.p.lon]);i--;continue}
+    let j=f.states.reduce((best,v,k)=>v.score<f.states[best].score?k:best,0);
+    const parts=[];
+    while(i>=0&&j>=0){
+      const cur=frames[i],st=cur.states[j];
+      if(st.path&&st.from>=0)parts.push(st.path);
+      const next=st.from;i--;j=next;
+    }
+    if(parts.length){const joined=[];for(const path of parts.reverse()){
+      if(!joined.length)joined.push(...path);else joined.push(...path.slice(1));
+    }if(joined.length>1)matched.push(joined)}
+  }
+  // A single valid road segment may contain several consecutive fixes even
+  // when the wider graph is incomplete. Render these local road-following runs.
+  // Do not connect points on different edges unless a graph path was found.
+  if(!matched.length){
+    let run=[];
+    for(let n=0;n<frames.length;n++){
+      const f=frames[n];
+      if(!f.cs.length){if(run.length>1)matched.push(run);run=[];continue}
+      const c=f.cs[0],prev=n?frames[n-1]:null,pc=prev?.cs?.[0];
+      const connected=pc&&pc.seg.way===c.seg.way&&pc.seg.index===c.seg.index&&
+        haversine(pc.lat,pc.lon,c.lat,c.lon)<80&&
+        (f.p.t-prev.p.t)<120000;
+      if(!connected){if(run.length>1)matched.push(run);run=[]}
+      run.push([c.lat,c.lon]);
+    }
+    if(run.length>1)matched.push(run);
+  }
+  // Adjacent connected paths are authoritative for display coverage. Preserve
+  // every successful transition instead of choosing between an entire global
+  // Viterbi run and a separate collection of local paths.
+  const local=[];
+  let current=[],lastCandidate=null,runStart=-1,runEnd=-1,parts=[];
+  function flush(){if(current.length>1){local.push(current);runs.push({startFixIndex:runStart,endFixIndex:runEnd,vertices:current.length});intervals.push(parts)}current=[];lastCandidate=null;runStart=-1;runEnd=-1;parts=[]}
+  for(let n=1;n<frames.length;n++){
+    const prev=frames[n-1],cur=frames[n];
+    const dt=(cur.p.t-prev.p.t)/1000;
+    const displacement=haversine(prev.p.lat,prev.p.lon,cur.p.lat,cur.p.lon);
+    if(!(dt>0&&dt<150&&displacement<350&&prev.cs.length&&cur.cs.length)){
+      transitions.push({fromFixIndex:n-1,toFixIndex:n,dtSeconds:dt,gpsMeters:displacement,reason:!(dt>0&&dt<150)?'time_gap':displacement>=350?'gps_jump':'no_candidates',previousCandidates:prev.cs.length,nextCandidates:cur.cs.length});flush();continue}
+    const limit=Math.min(700,Math.max(55,displacement*2.7+40,dt*3+35));
+    let best=null,bestScore=Infinity,bestStart=null,bestEnd=null;
+    for(const a of prev.cs.slice(0,7))for(const b of cur.cs.slice(0,7)){
+      const path=gpsRoadPath(a,b,limit);
+      if(!path)continue;
+      const distance=gpsPathLength(path);
+      if(distance/dt>7.5&&distance>35)continue;
+      let score=a.d+b.d+Math.abs(distance-displacement)*.5;
+      // At a shared GPS fix, prefer the same snapped road position. Do not
+      // mistake a 100m OSM detour between parallel streets for walking.
+      if(continuityPenalty&&current.length&&lastCandidate){
+        const mismatch=haversine(lastCandidate.lat,lastCandidate.lon,a.lat,a.lon);
+        if(mismatch>1.5)score+=continuityPenalty*Math.min(50,mismatch);
+      }
+      if(score<bestScore){bestScore=score;best=path;bestStart=a;bestEnd=b}
+    }
+    if(!best||best.length<2){transitions.push({fromFixIndex:n-1,toFixIndex:n,dtSeconds:dt,gpsMeters:displacement,reason:'no_valid_road_transition',previousCandidates:prev.cs.map(c=>({way:c.seg.way,index:c.seg.index,d:c.d})),nextCandidates:cur.cs.map(c=>({way:c.seg.way,index:c.seg.index,d:c.d}))});flush();continue}
+    // When two adjacent GPS transitions choose different edges at their
+    // shared fix, join ONLY through a short, connected OSM graph path.
+    // Never draw a direct connector across buildings or disconnected streets.
+    if(current.length&&lastCandidate){
+      const tail=current.at(-1),head=best[0];
+      if(haversine(tail[0],tail[1],head[0],head[1])>1.5){
+        const gap=haversine(tail[0],tail[1],head[0],head[1]);
+        const bridgeLimit=Math.min(130,Math.max(45,gap*3+15));
+        const bridge=gap<=42?gpsRoadPath(lastCandidate,bestStart,bridgeLimit):null;
+        if(bridge&&gpsPathLength(bridge)<=bridgeLimit){
+          current.push(...bridge.slice(1));
+        }else {transitions.push({fromFixIndex:n-1,toFixIndex:n,dtSeconds:dt,gpsMeters:displacement,reason:'candidate_switch_bridge_failed',bridgeGapMeters:gap,bridgeLimitMeters:bridgeLimit,bridgePathMeters:bridge?gpsPathLength(bridge):null,previousWay:lastCandidate.seg.way,nextWay:bestStart.seg.way});flush()}
+      }
+    }
+    if(!current.length){current.push(...best);runStart=n-1}
+    else current.push(...best.slice(1));
+    // Each interval maps one GPS fix pair to the exact selected OSM candidates
+    // and vertex range. This metadata is independent of visual polyline vertices.
+    parts.push({fromFixIndex:n-1,toFixIndex:n,startCandidate:bestStart,endCandidate:bestEnd,
+      startVertex:current.length-best.length,endVertex:current.length-1,
+      roadMeters:gpsPathLength(best)});
+    runEnd=n;lastCandidate=bestEnd;
+  }
+  flush();
+  return {matched:local,unmatched,runs,intervals,transitions};
+}
+
+
+function gpsDisplayTrackLocalCoverageConnected(){
+  const matched=[],unmatched=[],transitions=[],runs=[],raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+  if(!raw.length||!state.osmRoadSegments.length)return {matched,unmatched:raw.map(p=>[p.lat,p.lon])};
+  const frames=[];let previous=null;
+  for(const p of raw){
+    // Sparse samples are kept; zero movement and noisy stationary fixes do not
+    // force arbitrary loops through nearby parallel roads.
+    const cs=gpsCandidates(p),frame={p,cs,states:[]};
+    const dt=previous?Math.max(.1,(p.t-previous.p.t)/1000):0;
+    const displacement=previous?haversine(previous.p.lat,previous.p.lon,p.lat,p.lon):0;
+    for(let j=0;j<cs.length;j++){
+      const c=cs[j],sigma=Math.max(8,Math.min(40,(Number(p.accuracy)||16)*.8));
+      const emission=(c.d/sigma)**2*5;
+      let best={score:emission,from:-1,path:null};
+      if(previous&&dt<150&&displacement<350){
+        best={score:Infinity,from:-1,path:null};
+        for(let k=0;k<previous.states.length;k++){
+          const prior=previous.states[k];if(!Number.isFinite(prior.score))continue;
+          const limit=Math.min(700,Math.max(55,displacement*2.7+40,dt*3+35));
+          const path=gpsRoadPath(previous.cs[k],c,limit);
+          if(!path)continue;
+          const distance=gpsPathLength(path);
+          const speed=distance/dt;
+          if(speed>7.5&&distance>35)continue;
+          const transition=Math.abs(distance-displacement)*.38+Math.max(0,distance-displacement*1.7-20)*.7;
+          const score=prior.score+emission+transition;
+          if(score<best.score)best={score,from:k,path};
+        }
+        // No connected road transition: start a new trace, never bridge by a line.
+        if(best.from<0){
+          const previousBest=Math.min(...previous.states.map(x=>x.score));
+          best={score:previousBest+emission+120,from:-1,path:null};
+        }
+      }
+      frame.states.push(best);
+    }
+    frames.push(frame);previous=frame;
+  }
+  // Backtrack independently from the end of each connected run. This prevents
+  // future samples from causing abrupt switches between parallel streets.
+  let i=frames.length-1;
+  while(i>=0){
+    const f=frames[i];
+    if(!f.states.length){unmatched.push([f.p.lat,f.p.lon]);i--;continue}
+    let j=f.states.reduce((best,v,k)=>v.score<f.states[best].score?k:best,0);
+    const parts=[];
+    while(i>=0&&j>=0){
+      const cur=frames[i],st=cur.states[j];
+      if(st.path&&st.from>=0)parts.push(st.path);
+      const next=st.from;i--;j=next;
+    }
+    if(parts.length){const joined=[];for(const path of parts.reverse()){
+      if(!joined.length)joined.push(...path);else joined.push(...path.slice(1));
+    }if(joined.length>1)matched.push(joined)}
+  }
+  // A single valid road segment may contain several consecutive fixes even
+  // when the wider graph is incomplete. Render these local road-following runs.
+  // Do not connect points on different edges unless a graph path was found.
+  if(!matched.length){
+    let run=[];
+    for(let n=0;n<frames.length;n++){
+      const f=frames[n];
+      if(!f.cs.length){if(run.length>1)matched.push(run);run=[];continue}
+      const c=f.cs[0],prev=n?frames[n-1]:null,pc=prev?.cs?.[0];
+      const connected=pc&&pc.seg.way===c.seg.way&&pc.seg.index===c.seg.index&&
+        haversine(pc.lat,pc.lon,c.lat,c.lon)<80&&
+        (f.p.t-prev.p.t)<120000;
+      if(!connected){if(run.length>1)matched.push(run);run=[]}
+      run.push([c.lat,c.lon]);
+    }
+    if(run.length>1)matched.push(run);
+  }
+  // Adjacent connected paths are authoritative for display coverage. Preserve
+  // every successful transition instead of choosing between an entire global
+  // Viterbi run and a separate collection of local paths.
+  const local=[];
+  let current=[],lastCandidate=null,runStart=-1,runEnd=-1;
+  function flush(){if(current.length>1){local.push(current);runs.push({startFixIndex:runStart,endFixIndex:runEnd,vertices:current.length})}current=[];lastCandidate=null;runStart=-1;runEnd=-1}
+  for(let n=1;n<frames.length;n++){
+    const prev=frames[n-1],cur=frames[n];
+    const dt=(cur.p.t-prev.p.t)/1000;
+    const displacement=haversine(prev.p.lat,prev.p.lon,cur.p.lat,cur.p.lon);
+    if(!(dt>0&&dt<150&&displacement<350&&prev.cs.length&&cur.cs.length)){
+      transitions.push({fromFixIndex:n-1,toFixIndex:n,dtSeconds:dt,gpsMeters:displacement,reason:!(dt>0&&dt<150)?'time_gap':displacement>=350?'gps_jump':'no_candidates',previousCandidates:prev.cs.length,nextCandidates:cur.cs.length});flush();continue}
+    const limit=Math.min(700,Math.max(55,displacement*2.7+40,dt*3+35));
+    let best=null,bestScore=Infinity,bestStart=null,bestEnd=null,bestJoin=null;
+    for(const a of prev.cs.slice(0,7))for(const b of cur.cs.slice(0,7)){
+      const path=gpsRoadPath(a,b,limit);
+      if(!path)continue;
+      const distance=gpsPathLength(path);
+      if(distance/dt>7.5&&distance>35)continue;
+      // Choose a pair that can be connected to the existing displayed road.
+      // A locally cheapest pair can force a discontinuity at the shared fix.
+      let joinPath=null,joinDistance=0;
+      if(current.length&&lastCandidate){
+        const gap=haversine(lastCandidate.lat,lastCandidate.lon,a.lat,a.lon);
+        if(gap>1.5){
+          const joinLimit=Math.min(130,Math.max(45,gap*3+15));
+          if(gap>42)continue;
+          joinPath=gpsRoadPath(lastCandidate,a,joinLimit);
+          if(!joinPath)continue;
+          joinDistance=gpsPathLength(joinPath);
+          if(joinDistance>joinLimit)continue;
+        }
+      }
+      const score=a.d+b.d+Math.abs(distance-displacement)*.5+joinDistance*1.25;
+      if(score<bestScore){bestScore=score;best=path;bestStart=a;bestEnd=b;bestJoin=joinPath}
+    }
+    if(!best||best.length<2){transitions.push({fromFixIndex:n-1,toFixIndex:n,dtSeconds:dt,gpsMeters:displacement,reason:'no_valid_road_transition',previousCandidates:prev.cs.map(c=>({way:c.seg.way,index:c.seg.index,d:c.d})),nextCandidates:cur.cs.map(c=>({way:c.seg.way,index:c.seg.index,d:c.d}))});flush();continue}
+    // When two adjacent GPS transitions choose different edges at their
+    // shared fix, join ONLY through a short, connected OSM graph path.
+    // Never draw a direct connector across buildings or disconnected streets.
+    if(current.length&&bestJoin)current.push(...bestJoin.slice(1));
+    if(current.length&&lastCandidate&&!bestJoin){
+      const tail=current.at(-1),head=best[0];
+      if(haversine(tail[0],tail[1],head[0],head[1])>1.5){
+        const gap=haversine(tail[0],tail[1],head[0],head[1]);
+        const bridgeLimit=Math.min(130,Math.max(45,gap*3+15));
+        const bridge=gap<=42?gpsRoadPath(lastCandidate,bestStart,bridgeLimit):null;
+        if(bridge&&gpsPathLength(bridge)<=bridgeLimit){
+          current.push(...bridge.slice(1));
+        }else {transitions.push({fromFixIndex:n-1,toFixIndex:n,dtSeconds:dt,gpsMeters:displacement,reason:'candidate_switch_bridge_failed',bridgeGapMeters:gap,bridgeLimitMeters:bridgeLimit,bridgePathMeters:bridge?gpsPathLength(bridge):null,previousWay:lastCandidate.seg.way,nextWay:bestStart.seg.way});flush()}
+      }
+    }
+    if(!current.length){current.push(...best);runStart=n-1}
+    else current.push(...best.slice(1));
+    runEnd=n;lastCandidate=bestEnd;
+  }
+  flush();
+  return {matched:local,unmatched,runs,transitions};
+}
+
+
+// Look-ahead map matching: keep multiple candidate histories until the end of
+// a contiguous GPS window. Do not commit to a road at each individual fix.
+// Every emitted segment must be an actual OSM graph path.
+function gpsDisplayTrackWindowed(){
+  const raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+  const matched=[],runs=[],transitions=[],unmatched=[];
+  const frames=raw.map(p=>({p,cs:gpsCandidates(p).slice(0,7)}));
+  const selected=new Array(frames.length).fill(null);
+  const edges=new Array(frames.length).fill(null);
+  let windowStart=0;
+  // A window ends only at a truly unmatchable fix or impossible transition.
+  function solveWindow(start,end){
+    if(end<=start)return;
+    const dp=[],parents=[];
+    const first=frames[start];
+    dp[0]=first.cs.map(c=>c.d*1.6);parents[0]=first.cs.map(()=>null);
+    for(let i=start+1;i<=end;i++){
+      const prev=frames[i-1],cur=frames[i],dt=(cur.p.t-prev.p.t)/1000;
+      const displacement=haversine(prev.p.lat,prev.p.lon,cur.p.lat,cur.p.lon);
+      const limit=Math.min(700,Math.max(55,displacement*2.7+40,dt*3+35));
+      const costs=cur.cs.map(()=>Infinity),back=cur.cs.map(()=>null);
+      for(let j=0;j<cur.cs.length;j++)for(let k=0;k<prev.cs.length;k++){
+        if(!Number.isFinite(dp[i-start-1][k]))continue;
+        const path=gpsRoadPath(prev.cs[k],cur.cs[j],limit);
+        if(!path)continue;
+        const distance=gpsPathLength(path);
+        if(distance/dt>7.5&&distance>35)continue;
+        const emission=cur.cs[j].d*1.6;
+        const penalty=Math.abs(distance-displacement)*.5+Math.max(0,distance-displacement*1.7-20)*.7;
+        const score=dp[i-start-1][k]+emission+penalty;
+        if(score<costs[j]){costs[j]=score;back[j]={k,path}}
+      }
+      dp.push(costs);parents.push(back);
+    }
+    const last=dp.at(-1);let j=last.indexOf(Math.min(...last));
+    if(j<0||!Number.isFinite(last[j]))return;
+    for(let i=end;i>start;i--){const b=parents[i-start][j];if(!b)return;edges[i]=b.path;selected[i]=j;j=b.k}
+    selected[start]=j;
+  }
+  // Split windows where no valid candidate-to-candidate transition exists.
+  for(let i=1;i<=frames.length;i++){
+    let split=i===frames.length;
+    if(!split){
+      const a=frames[i-1],b=frames[i],dt=(b.p.t-a.p.t)/1000;
+      const displacement=haversine(a.p.lat,a.p.lon,b.p.lat,b.p.lon);
+      if(!(dt>0&&dt<150&&displacement<350&&a.cs.length&&b.cs.length))split=true;
+      else{
+        const limit=Math.min(700,Math.max(55,displacement*2.7+40,dt*3+35));
+        let possible=false;
+        for(const x of a.cs){if(possible)break;for(const y of b.cs){const path=gpsRoadPath(x,y,limit);if(!path)continue;const d=gpsPathLength(path);if(d/dt<=7.5||d<=35){possible=true;break}}}
+        split=!possible;
+      }
+    }
+    if(split){
+      solveWindow(windowStart,i-1);
+      if(i<frames.length){const a=frames[i-1],b=frames[i];transitions.push({fromFixIndex:i-1,toFixIndex:i,reason:!a.cs.length||!b.cs.length?'no_candidates':'no_plausible_road_transition'});}
+      windowStart=i;
+    }
+  }
+  let current=[],start=-1;
+  const flush=(end)=>{if(current.length>1){matched.push(current);runs.push({startFixIndex:start,endFixIndex:end,vertices:current.length})}current=[];start=-1};
+  for(let i=1;i<frames.length;i++){
+    const path=edges[i];
+    if(!path){flush(i-1);continue}
+    if(!current.length){current=[...path];start=i-1}
+    else current.push(...path.slice(1));
+  }
+  flush(frames.length-1);
+  for(let i=0;i<frames.length;i++)if(!frames[i].cs.length)unmatched.push([frames[i].p.lat,frames[i].p.lon]);
+  return {matched,unmatched,runs,transitions,matcher:'windowed_multi_candidate'};
+}
+
+// Preserve all successfully mapped intervals while merging ONLY adjacent runs
+// that can be joined along actual OSM graph edges. Unlike a global Viterbi
+// replacement, this operation never drops previously rendered GPS intervals.
+function gpsStitchCoverageRuns(result){
+  if(!result.runs||result.runs.length!==result.matched.length||result.runs.length<2)
+    return result;
+  const raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+  const lines=[],runs=[],joins=[],intervals=[];
+  const near=(a,b)=>haversine(a[0],a[1],b.lat,b.lon);
+  for(let i=0;i<result.matched.length;i++){
+    const line=result.matched[i],run=result.runs[i];
+    if(!lines.length){lines.push(line.slice());runs.push({...run});intervals.push((result.intervals?.[i]||[]).map(x=>({...x})));continue}
+    const prev=runs[runs.length-1],tail=lines[lines.length-1].at(-1),head=line[0];
+    const from=prev.endFixIndex,to=run.startFixIndex;
+    const p=raw[from],q=raw[to];
+    const dt=(q?.t-p?.t)/1000;
+    const gpsDistance=p&&q?haversine(p.lat,p.lon,q.lat,q.lon):Infinity;
+    let bridge=null,bridgeMeters=Infinity;
+    // A boundary can share a GPS fix (dt=0) when two neighboring mapped
+    // intervals chose different road segments. Require a very short join.
+    if(p&&q&&to>=from&&to-from<=4&&dt>=0&&dt<=90&&gpsDistance<=85){
+      const direct=haversine(tail[0],tail[1],head[0],head[1]);
+      if(direct<.7){bridge=[tail,head];bridgeMeters=direct}
+      else {
+        const ca=gpsCandidates(p).filter(c=>near(tail,c)<1.5);
+        const cb=gpsCandidates(q).filter(c=>near(head,c)<1.5);
+        const limit=dt===0?Math.min(35,Math.max(12,direct*2.5)):
+          Math.min(110,Math.max(22,gpsDistance*2+18,dt*2.5+10));
+        for(const a of ca)for(const b of cb){
+          const path=gpsRoadPath(a,b,limit);
+          if(!path)continue;
+          const length=gpsPathLength(path);
+          if(length>limit||(dt>0&&length>35&&length/dt>4.5))continue;
+          if(length<bridgeMeters){bridge=path;bridgeMeters=length}
+        }
+      }
+    }
+    if(bridge){
+      const target=lines[lines.length-1];
+      // Graph paths include the exact projected endpoints. No straight-line
+      // shortcuts across different roads are inserted.
+      const offset=target.length-1;
+      target.push(...bridge.slice(1),...line.slice(1));
+      intervals[intervals.length-1].push({fromFixIndex:from,toFixIndex:to,
+        startVertex:offset,endVertex:offset+bridge.length-1,roadMeters:bridgeMeters,stitch:true});
+      intervals[intervals.length-1].push(...(result.intervals?.[i]||[]).map(x=>({...x,
+        startVertex:x.startVertex+offset+bridge.length-1,endVertex:x.endVertex+offset+bridge.length-1})));
+      prev.endFixIndex=run.endFixIndex;prev.vertices=target.length;
+      joins.push({fromFixIndex:from,toFixIndex:to,roadMeters:bridgeMeters});
+    }else {lines.push(line.slice());runs.push({...run});intervals.push((result.intervals?.[i]||[]).map(x=>({...x})))}
+  }
+  const stitched={...result,matched:lines,runs,intervals,stitchJoins:joins,matcher:(result.matcher||'coverage')+'_safe_stitched'};
+  stitched.unresolvedGaps=gpsExplainUnresolvedGaps(stitched);
+  return stitched;
+}
+// Local constrained rematching around an unresolved boundary. Keep the remote
+// geometry untouched: only replace short tails/heads when a connected OSM
+// candidate path can explain the GPS fixes without an impossible walking speed.
+function gpsRematchLocalGaps(result){
+  if(!result.runs||result.runs.length!==result.matched.length||result.runs.length<2)return result;
+  const raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+  const lines=result.matched.map(x=>x.slice()),runs=result.runs.map(x=>({...x})),intervals=(result.intervals||[]).map(xs=>xs.map(x=>({...x}))),repairs=[];
+  const nearest=(line,c,fromEnd,runIndex,fixIndex)=>{
+    // Prefer exact GPS-indexed road vertices instead of searching arbitrary
+    // nearest points (which can land on the wrong parallel road).
+    const indexed=(intervals[runIndex]||[]).flatMap(x=>[
+      ...(x.fromFixIndex===fixIndex?[x.startVertex]:[]),
+      ...(x.toFixIndex===fixIndex?[x.endVertex]:[])]);
+    if(indexed.length){let best=null;for(const i of indexed){
+      if(i<0||i>=line.length)continue;
+      const d=haversine(line[i][0],line[i][1],c.lat,c.lon);
+      if(!best||d<best.d)best={i,d};
+    }return best||{i:-1,d:Infinity}}
+    return {i:-1,d:Infinity};
+  };
+  for(let k=1;k<lines.length;k++){
+    const left=runs[k-1],right=runs[k],from=left.endFixIndex,to=right.startFixIndex;
+    if(to<from||to-from>2||!raw[from]||!raw[to])continue;
+    const aLine=lines[k-1],bLine=lines[k];
+    // Search short fixed anchors at most 3 fixes either side of the gap.
+    const start=Math.max(left.startFixIndex,from-3),end=Math.min(right.endFixIndex,to+3);
+    if(end-start<2||end-start>9)continue;
+    const fixes=raw.slice(start,end+1),candidates=fixes.map(p=>gpsCandidates(p));
+    if(candidates.some(cs=>!cs.length))continue;
+    const leftAnchors=candidates[0].map(c=>({...c,at:nearest(aLine,c,true,k-1,start)})).filter(c=>c.at.d<3);
+    const rightAnchors=candidates.at(-1).map(c=>({...c,at:nearest(bLine,c,false,k,end)})).filter(c=>c.at.d<3);
+    if(!leftAnchors.length||!rightAnchors.length)continue;
+    let winner=null;
+    for(const anchor of leftAnchors){
+      let states=new Map([[anchor,{cost:anchor.d,path:[],meters:0}]]);
+      for(let n=1;n<fixes.length;n++){
+        const next=new Map(),dt=(fixes[n].t-fixes[n-1].t)/1000;
+        const disp=haversine(fixes[n-1].lat,fixes[n-1].lon,fixes[n].lat,fixes[n].lon);
+        if(!(dt>0&&dt<150&&disp<350)){states=new Map();break}
+        const limit=Math.min(200,Math.max(45,disp*2.5+25,dt*3+20));
+        for(const b of candidates[n]){
+          for(const [a,prior] of states){
+            const path=gpsRoadPath(a,b,limit);if(!path)continue;
+            const meters=gpsPathLength(path);
+            if(meters>35&&meters/dt>4.5)continue;
+            const cost=prior.cost+b.d+Math.abs(meters-disp)*.5;
+            if(!next.has(b)||cost<next.get(b).cost)
+              next.set(b,{cost,path:[...prior.path,path],meters:prior.meters+meters});
+          }
+        }
+        states=next;if(!states.size)break;
+      }
+      for(const endAnchor of rightAnchors){
+        const found=[...states].find(([c])=>c.seg===endAnchor.seg&&Math.abs(c.t-endAnchor.t)<1e-9);
+        const st=found?.[1];if(!st)continue;
+        const aCut=anchor.at.i,bCut=endAnchor.at.i;
+        const removed=gpsPathLength(aLine.slice(aCut))+gpsPathLength(bLine.slice(0,bCut+1));
+        // Prevent the rematch from erasing substantial mapped road coverage.
+        if(Math.abs(st.meters-removed)>Math.max(30,removed*.35))continue;
+        const score=st.cost+Math.abs(st.meters-removed);
+        if(!winner||score<winner.score)winner={score,aCut,bCut,paths:st.path,meters:st.meters,removed,start,end};
+      }
+    }
+    if(!winner)continue;
+    const middle=[];for(const path of winner.paths){if(!middle.length)middle.push(...path);else middle.push(...path.slice(1))}
+    if(!middle.length)continue;
+    const oldA=aLine.slice(),oldB=bLine.slice();
+    const updated=[...aLine.slice(0,winner.aCut),...middle,...bLine.slice(winner.bCut+1)];
+    // Anchors must be within 3m of original vertices. Avoid a synthetic
+    // diagonal from an anchor to the old line.
+    if(haversine(oldA[winner.aCut][0],oldA[winner.aCut][1],middle[0][0],middle[0][1])>0.8||
+       haversine(oldB[winner.bCut][0],oldB[winner.bCut][1],middle.at(-1)[0],middle.at(-1)[1])>0.8)continue;
+    lines[k-1]=updated;lines.splice(k,1);
+    const keptLeft=(intervals[k-1]||[]).filter(x=>x.toFixIndex<=winner.start&&x.endVertex<=winner.aCut);
+    const keptRight=(intervals[k]||[]).filter(x=>x.fromFixIndex>=winner.end&&x.startVertex>=winner.bCut)
+      .map(x=>({...x,startVertex:x.startVertex-winner.bCut+winner.aCut+middle.length-1,
+        endVertex:x.endVertex-winner.bCut+winner.aCut+middle.length-1}));
+    intervals[k-1]=[...keptLeft,{fromFixIndex:winner.start,toFixIndex:winner.end,
+      startVertex:winner.aCut,endVertex:winner.aCut+middle.length-1,
+      roadMeters:winner.meters,rematched:true},...keptRight];intervals.splice(k,1);
+    runs[k-1]={...left,endFixIndex:right.endFixIndex,vertices:updated.length};runs.splice(k,1);
+    repairs.push({fromFixIndex:from,toFixIndex:to,windowStart:winner.start,windowEnd:winner.end,
+      oldMeters:winner.removed,newMeters:winner.meters});k--;
+  }
+  const out={...result,matched:lines,runs,intervals,localRepairs:repairs};
+  out.unresolvedGaps=gpsExplainUnresolvedGaps(out);
+  return out;
+}
+// Indexed, bounded re-routing: replace only the two GPS intervals adjacent to
+// a split. Their outer endpoints are held fixed on the original OSM edges.
+// A replacement is accepted only if it is continuous, plausible in elapsed
+// time, and does not erase meaningful existing street coverage.
+function gpsRepairIndexedBoundaries(result){
+  if(!result.intervals||!result.runs||result.runs.length<2)return result;
+  const raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+  const lines=result.matched.map(l=>l.slice()),runs=result.runs.map(r=>({...r}));
+  const parts=result.intervals.map(xs=>xs.map(x=>({...x}))),repairs=[],attempts=[];
+  for(let k=1;k<lines.length;k++){
+    const left=runs[k-1],right=runs[k],f=left.endFixIndex,g=right.startFixIndex;
+    const lp=parts[k-1],rp=parts[k];
+    const a=lp.at(-1),b=rp[0];
+    if(!a||!b||!a.startCandidate||!b.endCandidate||g<f||g-f>1){
+      attempts.push({fromFixIndex:f,toFixIndex:g,reason:'no_indexed_anchors'});continue;
+    }
+    const start=a.fromFixIndex,end=b.toFixIndex;
+    if(end-start>4||start>=end){attempts.push({fromFixIndex:f,toFixIndex:g,reason:'window_too_wide'});continue}
+    const original=gpsPathLength(lines[k-1].slice(a.startVertex))+gpsPathLength(lines[k].slice(0,b.endVertex+1));
+    const first=a.startCandidate,last=b.endCandidate;
+    // Include the original snapped points, even if they are outside the
+    // closest seven candidates for a noisy GPS fix.
+    const candidates=[];
+    for(let i=start;i<=end;i++)candidates.push(i===start?[first]:i===end?[last]:gpsCandidates(raw[i]).slice(0,12));
+    let states=[{c:first,score:0,meters:0,paths:[]}],failure='no_connected_candidate_path';
+    for(let i=start+1;i<=end;i++){
+      const dt=(raw[i].t-raw[i-1].t)/1000;
+      const disp=haversine(raw[i-1].lat,raw[i-1].lon,raw[i].lat,raw[i].lon);
+      if(!(dt>0&&dt<150&&disp<350)){states=[];failure='invalid_gps_time_or_jump';break}
+      const next=[];
+      for(const c of candidates[i-start]){
+        let best=null;
+        for(const prev of states){
+          const limit=Math.min(700,Math.max(55,disp*2.7+40,dt*3+35));
+          const path=gpsRoadPath(prev.c,c,limit);if(!path)continue;
+          const meters=gpsPathLength(path);
+          if(meters>35&&meters/dt>7.5)continue;
+          const score=prev.score+c.d+Math.abs(meters-disp)*.5+Math.max(0,meters-disp*1.7-20)*.7;
+          if(!best||score<best.score)best={c,score,meters:prev.meters+meters,paths:[...prev.paths,path]};
+        }
+        if(best)next.push(best);
+      }
+      states=next;if(!states.length)break;
+    }
+    const best=states[0];
+    if(!best){attempts.push({fromFixIndex:f,toFixIndex:g,reason:failure});continue}
+    const geometry=[];
+    for(const path of best.paths){if(!geometry.length)geometry.push(...path);else geometry.push(...path.slice(1))}
+    const difference=Math.abs(best.meters-original);
+    if(difference>Math.max(30,original*.35)){
+      attempts.push({fromFixIndex:f,toFixIndex:g,reason:'coverage_difference',oldMeters:original,newMeters:best.meters});continue;
+    }
+    const leftLine=lines[k-1],rightLine=lines[k];
+    if(!geometry.length||haversine(...leftLine[a.startVertex],...geometry[0])>1||
+       haversine(...rightLine[b.endVertex],...geometry.at(-1))>1){
+      attempts.push({fromFixIndex:f,toFixIndex:g,reason:'anchor_mismatch'});continue;
+    }
+    const prefix=leftLine.slice(0,a.startVertex),suffix=rightLine.slice(b.endVertex+1);
+    const joined=[...prefix,...geometry,...suffix];
+    const offset=prefix.length+geometry.length-b.endVertex-1;
+    const keptLeft=lp.filter(x=>x.endVertex<=a.startVertex&&x!==a);
+    const keptRight=rp.filter(x=>x.startVertex>=b.endVertex&&x!==b).map(x=>({...x,startVertex:x.startVertex+offset,endVertex:x.endVertex+offset}));
+    lines[k-1]=joined;lines.splice(k,1);
+    parts[k-1]=[...keptLeft,{fromFixIndex:start,toFixIndex:end,startVertex:prefix.length,endVertex:prefix.length+geometry.length-1,
+      roadMeters:best.meters,rematched:true,startCandidate:first,endCandidate:last},...keptRight];parts.splice(k,1);
+    runs[k-1]={...left,endFixIndex:right.endFixIndex,vertices:joined.length};runs.splice(k,1);
+    repairs.push({fromFixIndex:f,toFixIndex:g,windowStart:start,windowEnd:end,oldMeters:original,newMeters:best.meters});k--;
+  }
+  const out={...result,matched:lines,runs,intervals:parts,indexedRepairs:repairs,indexedRepairAttempts:attempts};
+  out.unresolvedGaps=gpsExplainUnresolvedGaps(out);
+  return out;
+}
+// Re-evaluate several consecutive GPS intervals on both sides of a split.
+// Anchors are exact previously drawn OSM projections. Replacing only the
+// indexed interior leaves all outside vertices and their fix mapping intact.
+function gpsRepairWideBoundaries(result){
+  if(!result.intervals||!result.runs||result.runs.length<2)return result;
+  const raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+  const lines=result.matched.map(l=>l.slice()),runs=result.runs.map(r=>({...r}));
+  const parts=result.intervals.map(xs=>xs.map(x=>({...x}))),repairs=[],attempts=[];
+  for(let k=1;k<lines.length;k++){
+    const left=runs[k-1],right=runs[k],f=left.endFixIndex,g=right.startFixIndex;
+    const lp=parts[k-1],rp=parts[k];
+    if(!lp?.length||!rp?.length||g<f||g-f>2){attempts.push({fromFixIndex:f,toFixIndex:g,reason:'missing_indexed_boundary'});continue}
+    let winner=null,checked=0,connected=0,rejected=0;
+    for(const width of [2,4,6,9]){
+      const la=lp[Math.max(0,lp.length-width)],rb=rp[Math.min(rp.length-1,width-1)];
+      if(!la.startCandidate||!rb.endCandidate)continue;
+      const start=la.fromFixIndex,end=rb.toFixIndex;
+      if(end-start<2||end-start>22||!raw[start]||!raw[end])continue;
+      checked++;
+      const candidateSets=[];
+      for(let i=start;i<=end;i++)candidateSets.push(i===start?[la.startCandidate]:i===end?[rb.endCandidate]:gpsCandidates(raw[i]).slice(0,12));
+      if(candidateSets.some(cs=>!cs.length))continue;
+      let states=[{c:la.startCandidate,score:0,meters:0,paths:[]}];
+      for(let i=start+1;i<=end;i++){
+        const dt=(raw[i].t-raw[i-1].t)/1000,disp=haversine(raw[i-1].lat,raw[i-1].lon,raw[i].lat,raw[i].lon);
+        if(!(dt>0&&dt<150&&disp<350)){states=[];break}
+        const limit=Math.min(700,Math.max(55,disp*2.7+40,dt*3+35));
+        const next=[];
+        for(const b of candidateSets[i-start]){
+          let best=null;
+          for(const prev of states){
+            const path=gpsRoadPath(prev.c,b,limit);if(!path)continue;
+            const meters=gpsPathLength(path);
+            if(meters>35&&meters/dt>7.5)continue;
+            const score=prev.score+b.d+Math.abs(meters-disp)*.5+Math.max(0,meters-disp*1.7-20)*.7;
+            if(!best||score<best.score)best={c:b,score,meters:prev.meters+meters,paths:[...prev.paths,path]};
+          }
+          if(best)next.push(best);
+        }
+        states=next;if(!states.length)break;
+      }
+      if(!states.length)continue;
+      connected++;
+      const best=states.reduce((a,b)=>b.score<a.score?b:a);
+      const oldLeft=lines[k-1],oldRight=lines[k];
+      const original=gpsPathLength(oldLeft.slice(la.startVertex))+gpsPathLength(oldRight.slice(0,rb.endVertex+1));
+      if(Math.abs(best.meters-original)>Math.max(30,original*.35)){rejected++;continue}
+      const middle=[];for(const path of best.paths){if(!middle.length)middle.push(...path);else middle.push(...path.slice(1))}
+      if(middle.length<2||haversine(...oldLeft[la.startVertex],...middle[0])>1||haversine(...oldRight[rb.endVertex],...middle.at(-1))>1){rejected++;continue}
+      const score=best.score+Math.abs(best.meters-original)*2;
+      if(!winner||score<winner.score)winner={score,start,end,la,rb,middle,meters:best.meters,original};
+    }
+    if(!winner){attempts.push({fromFixIndex:f,toFixIndex:g,reason:connected?'coverage_or_anchor_rejected':'no_plausible_wide_path',windowsChecked:checked,connectedWindows:connected,rejectedWindows:rejected});continue}
+    const {start,end,la,rb,middle,meters,original}=winner;
+    const prefix=lines[k-1].slice(0,la.startVertex),suffix=lines[k].slice(rb.endVertex+1);
+    const joined=[...prefix,...middle,...suffix],offset=prefix.length+middle.length-rb.endVertex-1;
+    const keepLeft=lp.filter(x=>x.endVertex<=la.startVertex&&x!==la);
+    const keepRight=rp.filter(x=>x.startVertex>=rb.endVertex&&x!==rb).map(x=>({...x,startVertex:x.startVertex+offset,endVertex:x.endVertex+offset}));
+    lines[k-1]=joined;lines.splice(k,1);
+    parts[k-1]=[...keepLeft,{fromFixIndex:start,toFixIndex:end,startVertex:prefix.length,endVertex:prefix.length+middle.length-1,roadMeters:meters,rematched:true,wideRematched:true,startCandidate:la.startCandidate,endCandidate:rb.endCandidate},...keepRight];parts.splice(k,1);
+    runs[k-1]={...left,endFixIndex:right.endFixIndex,vertices:joined.length};runs.splice(k,1);
+    repairs.push({fromFixIndex:f,toFixIndex:g,windowStart:start,windowEnd:end,oldMeters:original,newMeters:meters});k--;
+  }
+  const out={...result,matched:lines,runs,intervals:parts,wideRepairs:repairs,wideRepairAttempts:attempts};
+  out.unresolvedGaps=gpsExplainUnresolvedGaps(out);return out;
+}
+// Jointly optimize the road candidate at each GPS fix across a boundary window.
+// A single candidate is shared by the incoming and outgoing interval. Unlike
+// independent pair selection this cannot teleport between parallel roads at
+// the same GPS timestamp. The existing indexed intervals are the coverage
+// contract: outside the window geometry is never changed.
+function gpsOptimizeJointBoundaryWindows(result){
+  if(!result.intervals||!result.runs||result.runs.length<2)return result;
+  const raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+  const lines=result.matched.map(l=>l.slice()),runs=result.runs.map(r=>({...r}));
+  const parts=result.intervals.map(xs=>xs.map(x=>({...x}))),attempts=[],repairs=[];
+  for(let k=1;k<lines.length;k++){
+    const left=runs[k-1],right=runs[k],lp=parts[k-1],rp=parts[k];
+    const f=left.endFixIndex,g=right.startFixIndex;
+    if(!lp?.length||!rp?.length||g<f||g-f>2){attempts.push({fromFixIndex:f,toFixIndex:g,reason:'missing_interval_mapping'});continue}
+    let winner=null,reason='no_joint_connected_path';
+    for(const width of [3,6,10,15,24]){
+      const la=lp[Math.max(0,lp.length-width)],rb=rp[Math.min(rp.length-1,width-1)];
+      if(!la.startCandidate||!rb.endCandidate)continue;
+      const start=la.fromFixIndex,end=rb.toFixIndex;
+      if(end-start<2||end-start>54||!raw[start]||!raw[end])continue;
+      const sets=[];
+      for(let i=start;i<=end;i++)sets.push(i===start?[la.startCandidate]:i===end?[rb.endCandidate]:gpsCandidates(raw[i]));
+      if(sets.some(cs=>!cs.length)){reason='no_candidates';continue}
+      // Viterbi dynamic programming with one state per shared GPS fix, not
+      // one independent pair of candidates per GPS interval.
+      let states=[{c:sets[0][0],score:0,meters:0,paths:[],intervalMeters:[],candidates:[sets[0][0]]}];
+      for(let i=start+1;i<=end;i++){
+        const dt=(raw[i].t-raw[i-1].t)/1000;
+        const disp=haversine(raw[i-1].lat,raw[i-1].lon,raw[i].lat,raw[i].lon);
+        if(!(dt>0&&dt<150&&disp<350)){states=[];reason='invalid_time_or_jump';break}
+        const limit=Math.min(700,Math.max(55,disp*2.7+40,dt*3+35));
+        const next=[];
+        for(const b of sets[i-start]){
+          let best=null;
+          for(const st of states){
+            const path=gpsRoadPath(st.c,b,limit);if(!path)continue;
+            const meters=gpsPathLength(path);
+            if(meters>35&&meters/dt>7.5)continue;
+            const score=st.score+b.d+Math.abs(meters-disp)*.5+
+              Math.max(0,meters-disp*1.7-20)*.7;
+            if(!best||score<best.score)best={c:b,score,meters:st.meters+meters,
+              paths:[...st.paths,path],intervalMeters:[...st.intervalMeters,meters],
+              candidates:[...st.candidates,b]};
+          }
+          if(best)next.push(best);
+        }
+        states=next;
+        if(!states.length)break;
+      }
+      if(!states.length)continue;
+      const best=states.reduce((a,b)=>b.score<a.score?b:a);
+      const oldLeft=lines[k-1],oldRight=lines[k];
+      const original=gpsPathLength(oldLeft.slice(la.startVertex))+
+        gpsPathLength(oldRight.slice(0,rb.endVertex+1));
+      // Do not trade already-mapped street coverage for a smaller run count.
+      if(Math.abs(best.meters-original)>Math.max(30,original*.35)){
+        reason='coverage_difference';continue;
+      }
+      const middle=[];for(const path of best.paths){
+        if(!middle.length)middle.push(...path);else middle.push(...path.slice(1));
+      }
+      if(middle.length<2||haversine(...oldLeft[la.startVertex],...middle[0])>1||
+        haversine(...oldRight[rb.endVertex],...middle.at(-1))>1){reason='anchor_mismatch';continue}
+      const score=best.score+Math.abs(best.meters-original)*2;
+      if(!winner||score<winner.score)winner={score,start,end,la,rb,best,middle,original};
+    }
+    if(!winner){attempts.push({fromFixIndex:f,toFixIndex:g,reason});continue}
+    const {start,end,la,rb,best,middle,original}=winner;
+    const prefix=lines[k-1].slice(0,la.startVertex),suffix=lines[k].slice(rb.endVertex+1);
+    const joined=[...prefix,...middle,...suffix];
+    const keepLeft=lp.filter(x=>x.endVertex<=la.startVertex&&x!==la);
+    const offset=prefix.length+middle.length-rb.endVertex-1;
+    const keepRight=rp.filter(x=>x.startVertex>=rb.endVertex&&x!==rb)
+      .map(x=>({...x,startVertex:x.startVertex+offset,endVertex:x.endVertex+offset}));
+    // Preserve exact per-fix interval mapping, not one coarse replacement span.
+    const replacements=[];let vertex=prefix.length;
+    for(let i=0;i<best.paths.length;i++){
+      const path=best.paths[i],begin=vertex;
+      vertex+=path.length-(i===0?0:1);
+      replacements.push({fromFixIndex:start+i,toFixIndex:start+i+1,
+        startVertex:begin-(i?1:0),endVertex:vertex-1,
+        roadMeters:best.intervalMeters[i],jointOptimized:true,
+        startCandidate:best.candidates[i],endCandidate:best.candidates[i+1]});
+    }
+    lines[k-1]=joined;lines.splice(k,1);
+    parts[k-1]=[...keepLeft,...replacements,...keepRight];parts.splice(k,1);
+    runs[k-1]={...left,endFixIndex:right.endFixIndex,vertices:joined.length};runs.splice(k,1);
+    repairs.push({fromFixIndex:f,toFixIndex:g,windowStart:start,windowEnd:end,
+      oldMeters:original,newMeters:best.meters});k--;
+  }
+  const out={...result,matched:lines,runs,intervals:parts,jointRepairs:repairs,jointRepairAttempts:attempts};
+  out.unresolvedGaps=gpsExplainUnresolvedGaps(out);return out;
+}
+// Explain unresolved boundaries using the actual rendered endpoint candidates.
+// A graph component being connected does not imply a plausible pedestrian
+// transition: parallel roads can be separated by a >100m detour.
+function gpsExplainUnresolvedGaps(result){
+  if(!result.runs||result.runs.length!==result.matched.length)return [];
+  const raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+  const out=[];
+  for(let i=1;i<result.runs.length;i++){
+    const left=result.runs[i-1],right=result.runs[i];
+    const p=raw[left.endFixIndex],q=raw[right.startFixIndex];
+    if(!p||!q)continue;
+    const tail=result.matched[i-1].at(-1),head=result.matched[i][0];
+    const dt=(q.t-p.t)/1000;
+    const straight=haversine(tail[0],tail[1],head[0],head[1]);
+    let shortest=Infinity,fromWay=null,toWay=null;
+    const ca=gpsCandidates(p).filter(c=>haversine(c.lat,c.lon,tail[0],tail[1])<1.5);
+    const cb=gpsCandidates(q).filter(c=>haversine(c.lat,c.lon,head[0],head[1])<1.5);
+    for(const a of ca)for(const b of cb){
+      const path=gpsRoadPath(a,b,250);
+      if(!path)continue;
+      const meters=gpsPathLength(path);
+      if(meters<shortest){shortest=meters;fromWay=a.seg.way;toWay=b.seg.way}
+    }
+    const maxAllowed=dt===0?Math.min(35,Math.max(12,straight*2.5)):
+      Math.min(110,Math.max(22,haversine(p.lat,p.lon,q.lat,q.lon)*2+18,dt*2.5+10));
+    const reason=dt===0&&shortest>maxAllowed?'same_fix_incompatible_road_snap':
+      !Number.isFinite(shortest)?'no_road_path_within_250m':
+      shortest>maxAllowed?'road_detour_exceeds_limit':
+      dt>0&&shortest>35&&shortest/dt>4.5?'implausible_pedestrian_speed':
+      'not_stitched_check_endpoint_precision';
+    out.push({fromFixIndex:left.endFixIndex,toFixIndex:right.startFixIndex,
+      dtSeconds:dt,endpointMeters:straight,roadMeters:Number.isFinite(shortest)?shortest:null,
+      maxAllowedMeters:maxAllowed,fromWay,toWay,reason});
+  }
+  return out;
+}
+function gpsValidateIntervalMapping(result){
+  if(!result.intervals||result.intervals.length!==result.matched.length)return false;
+  return result.intervals.every((parts,k)=>parts.every(x=>
+    Number.isInteger(x.fromFixIndex)&&Number.isInteger(x.toFixIndex)&&
+    Number.isInteger(x.startVertex)&&Number.isInteger(x.endVertex)&&
+    x.startVertex>=0&&x.endVertex>=x.startVertex&&x.endVertex<result.matched[k].length));
+}
+function gpsPathLengthLines(lines){return lines.reduce((sum,line)=>sum+gpsPathLength(line),0)}
+function gpsDisplayTrack(){
+  const matched=[],unmatched=[],breaks=[];
+  const raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+  if(!raw.length||!state.osmRoadSegments.length)return {matched,unmatched:raw.map(p=>[p.lat,p.lon]),breaks};
+  // Viterbi: score the complete sequence, including candidate-to-candidate
+  // road travel. Never substitute a straight line when the OSM graph is broken.
+  const frames=[];
+  for(let i=0;i<raw.length;i++){
+    const p=raw[i],cs=gpsCandidates(p).slice(0,4),prior=frames.at(-1);
+    const dt=prior?(p.t-prior.p.t)/1000:0;
+    const displacement=prior?haversine(prior.p.lat,prior.p.lon,p.lat,p.lon):0;
+    const states=cs.map(c=>{
+      const sigma=Math.max(8,Math.min(40,(Number(p.accuracy)||16)*.8));
+      return {score:Math.pow(c.d/sigma,2)*5,from:-1,path:null};
+    });
+    if(prior&&dt>0&&dt<150&&displacement<350){
+      const limit=Math.min(700,Math.max(55,displacement*2.7+40,dt*3+35));
+      const base=Math.min(...prior.states.map(x=>x.score));
+      for(let j=0;j<cs.length;j++){
+        const emission=states[j].score;
+        states[j].score=base+emission+85; // restarting is allowed, but costly
+        for(let k=0;k<prior.cs.length;k++){
+          if(!Number.isFinite(prior.states[k].score))continue;
+          const path=gpsRoadPath(prior.cs[k],cs[j],limit);
+          if(!path)continue;
+          const distance=gpsPathLength(path);
+          if(distance/dt>7.5&&distance>35)continue;
+          const transition=Math.abs(distance-displacement)*.38+
+            Math.max(0,distance-displacement*1.7-20)*.7;
+          const score=prior.states[k].score+emission+transition;
+          if(score<states[j].score)states[j]={score,from:k,path};
+        }
+      }
+    }else if(prior){
+      const base=Math.min(...prior.states.map(x=>x.score));
+      for(const st of states)st.score+=base+85;
+    }
+    frames.push({p,cs,states});
+  }
+  // Trace the best path backwards, respecting each explicit restart. A local
+  // nearest-road decision cannot overwrite this globally optimized sequence.
+  let i=frames.length-1;
+  while(i>=0){
+    const f=frames[i];
+    if(!f.cs.length){unmatched.push([f.p.lat,f.p.lon]);breaks.push({index:i,reason:'no_road_candidate'});i--;continue}
+    let j=f.states.reduce((best,st,k)=>st.score<f.states[best].score?k:best,0);
+    const parts=[];let end=i;
+    while(i>=0&&j>=0){
+      const st=frames[i].states[j];
+      if(st.path&&st.from>=0)parts.push(st.path);
+      const next=st.from;i--;j=next;
+    }
+    if(parts.length){
+      const line=[];
+      for(const path of parts.reverse()){
+        if(!line.length)line.push(...path);
+        else line.push(...path.slice(1));
+      }
+      if(line.length>1)matched.push(line);
+    }
+    if(i>=0)breaks.push({index:i+1,next:end,reason:'no_plausible_connected_transition'});
+  }
+  matched.reverse();breaks.reverse();
+  // Preserve road coverage if global Viterbi prefers too many restarts.
+  // Both alternatives use only connected OSM geometry, never raw straight lines.
+  const continuous=gpsDisplayTrackLocal();
+  const coverage=gpsDisplayTrackLocalCoverage();
+  const consistentVariants=[0.25,0.5,1,2,4,8].map(weight=>({weight,result:gpsDisplayTrackLocalCoverage(weight)}));
+  const safeConsistent=consistentVariants.filter(x=>
+    gpsPathLengthLines(x.result.matched)>=gpsPathLengthLines(coverage.matched)*.98&&
+    x.result.matched.length<coverage.matched.length)
+    .sort((a,b)=>a.result.matched.length-b.result.matched.length||
+      gpsPathLengthLines(b.result.matched)-gpsPathLengthLines(a.result.matched))[0]?.result;
+  const connected=gpsDisplayTrackLocalCoverageConnected();
+  const windowed=gpsDisplayTrackWindowed();
+  // Prefer a continuous road-constrained trace only when it retains coverage.
+  // Fewer lines alone is not evidence of improvement if walked streets disappear.
+  // Reject continuity-only matches that silently discard substantial walked
+  // coverage. A smaller number of polylines is not enough to select a trace.
+  const continuousMeters=gpsPathLengthLines(continuous.matched);
+  const coverageMeters=gpsPathLengthLines(coverage.matched);
+  const connectedMeters=gpsPathLengthLines(connected.matched);
+  const windowedMeters=gpsPathLengthLines(windowed.matched);
+  // Prefer a connection-aware trace only when it preserves >=98% of the
+  // coverage baseline. Never hide 850m of streets just to remove gaps.
+  const local=safeConsistent || (windowedMeters>=coverageMeters*0.98&&windowed.matched.length<coverage.matched.length?windowed:
+    connectedMeters>=coverageMeters*0.98&&connected.matched.length<coverage.matched.length?connected:
+    continuousMeters>=coverageMeters*0.98?continuous:coverage);
+  const length=lines=>lines.reduce((sum,line)=>sum+gpsPathLength(line),0);
+  if(length(local.matched)>length(matched)*1.05)
+    return gpsOptimizeJointBoundaryWindows(gpsRepairWideBoundaries(gpsRepairIndexedBoundaries(gpsRematchLocalGaps(gpsStitchCoverageRuns({matched:local.matched,unmatched:local.unmatched,breaks,runs:local.runs,intervals:local.intervals,transitions:local.transitions,matcher:local===safeConsistent?'shared_fix_consistent':local===windowed?'windowed_multi_candidate':local===connected?'connected_candidate_coverage_safe':local===continuous?'continuity_aware':'coverage_preserving_fallback'}))))); 
+  return {matched,unmatched,breaks,matcher:'viterbi'};
 }
 // Show ONLY graph-connected street geometry as a line. Never join raw GPS fixes
 // across buildings: a straight raw fallback was the cause of misleading traces.
@@ -262,10 +1204,8 @@ function drawGpsTrack(){
   let result={matched:[],unmatched:[]};
   if(state.osmRoadSegments.length){
     try{
-      // Matching a whole multi-hour trace on each GPS update stalls mobile devices.
-      const original=state.gpsTrack;
-      if(original.length>350)state.gpsTrack=original.slice(-350);
-      try{result=gpsDisplayTrack()}finally{state.gpsTrack=original}
+      // Keep the entire recorded walk visible, including sessions >350 fixes.
+      result=gpsDisplayTrack();
     }catch(e){console.warn('GPS道路補正失敗',e)}
   }
   if(result.matched.length){
@@ -277,10 +1217,15 @@ function drawGpsTrack(){
   const dots=L.layerGroup();
   for(let i=0;i<samples.length;i+=Math.max(1,Math.ceil(samples.length/175))){
     const p=samples[i];
-    L.circleMarker([p.lat,p.lon],{radius:3,color:'#a78bfa',fillColor:'#a78bfa',fillOpacity:.65,weight:0,interactive:false}).addTo(dots);
+    L.circleMarker([p.lat,p.lon],{radius:5,color:'#6d28d9',fillColor:'#a78bfa',fillOpacity:.9,weight:1,interactive:false}).addTo(dots);
   }
   state.layers.gpsUnmatched=dots.addTo(map);
   state.layers.gpsTrack?.bringToFront?.();
+  const gpsInfo=$('gpsStatus');
+  if(gpsInfo&&raw.length>1&&!result.matched.length){
+    const reason=state.osmRoadSegments.length?'道路の接続判定が未成立':'周辺の道路データを取得できていません';
+    gpsInfo.textContent=`GPS ${raw.length}点を保存済み / ${reason}。道路追従線は未生成です。`;
+  }
 }
 async function restoreFieldSession(){const generation=state.kmzUploadGeneration;const x=await sessionGet();if(!x||generation!==state.kmzUploadGeneration)return;state.restoring=true;state.kmzBlob=x.kmzBlob||null;state.geojson=x.geojson||null;state.areaGeojson=x.areaGeojson||null;state.summary=x.summary||null;state.areaInfo=x.areaInfo||{};state.workerId=+x.workerId||1;state.completed=new Set(x.completed||[]);state.fieldGuideLeg=+x.fieldGuideLeg||0;state.activeGuideLeg=+x.activeGuideLeg||0;state.guidePassed=new Set(x.guidePassed||[]);restoreServicePasses(x.servicePasses);state.gpsTrack=Array.isArray(x.gpsTrack)?x.gpsTrack:[];state.roadPasses=x.roadPasses||{};state.gpsTrackingDesired=!!x.gpsTrackingDesired;if(x.startLat&&x.startLon)setStartPoint(+x.startLat,+x.startLon);if(x.areas?.length){$('area').innerHTML=x.areas.map(a=>`<option>${escapeHtml(a)}</option>`).join('');$('area').disabled=false;$('build').disabled=false;$('refreshOsm').disabled=false;if(x.selectedArea)$('area').value=x.selectedArea}if(state.areaGeojson){renderAreaBoundaries(false);renderHouseholdInfo()}if(state.geojson){renderGeneratedMap();renderMetrics();renderDownloads();prepareWorkerUI();loadWorker(state.workerId,{preserveProgress:true});restoreServicePasses(x.servicePasses);state.guidePassed=new Set(x.guidePassed||[]);drawGuideProgress();drawGpsTrack();status('status','前回の作業状態を自動復元しました。','success')}drawGpsTrack();loadGpsRoadNetwork(x.selectedArea||$('area')?.value);state.restoring=false;/* KMZ auto-upload intentionally disabled: user initiated uploads are authoritative. */if(state.gpsTrackingDesired)setTimeout(()=>startGpsTracking(true),500)}
 
@@ -617,7 +1562,7 @@ function setupGoogleLogin(){const cid=state.config.google_client_id;if(!cid){$('
 function renderLogin(){if(state.user){$('loginBox').innerHTML=`<button id="logout" class="ghost">${escapeHtml(state.user.name||state.user.email)} ▾</button>`;$('logout').onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'})}catch{}state.sessionToken='';state.user=null;localStorage.removeItem('pn_session');$('myProjectsBox').classList.add('hidden');renderLogin()}}else if(window.google){$('loginBox').innerHTML='<div id="googleBtn"></div>';google.accounts.id.renderButton($('googleBtn'),{theme:'outline',size:'medium',text:'signin_with',shape:'pill'})}}
 
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'){saveFieldSession();gpsTrackPut();}else{drawGpsTrack();if(state.gpsTrackingDesired&&state.watchId===null)startGpsTracking(true)}});window.addEventListener('pagehide',()=>{saveFieldSession();gpsTrackPut()});
-let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.32',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
+let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.37',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
 
 function haversine(lat1,lon1,lat2,lon2){const R=6371000,p=Math.PI/180,dLat=(lat2-lat1)*p,dLon=(lon2-lon1)*p,a=Math.sin(dLat/2)**2+Math.cos(lat1*p)*Math.cos(lat2*p)*Math.sin(dLon/2)**2;return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))}
 function pointSegmentMeters(lat,lon,lat1,lon1,lat2,lon2){const mLat=(lat+lat1+lat2)/3*Math.PI/180,x=(v)=>v*Math.PI/180*6371000*Math.cos(mLat),y=(v)=>v*Math.PI/180*6371000;const px=x(lon),py=y(lat),ax=x(lon1),ay=y(lat1),bx=x(lon2),by=y(lat2),dx=bx-ax,dy=by-ay;const t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/(dx*dx+dy*dy||1)));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy))}
@@ -687,7 +1632,7 @@ window.postingNavigatorNativePosition=function(p){
       const match=html.match(/class="badge"[^>]*>v(\d+\.\d+\.\d+)</);
       if(!match)throw new Error('公開中のバージョンを取得できません');
       const published=match[1];
-      if(published==='1.9.32'){
+      if(published==='1.9.37'){
         button.textContent='v'+published+' 確認済み';
       }else{
         button.textContent='公開中 v'+published;
