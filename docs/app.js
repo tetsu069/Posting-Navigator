@@ -20,7 +20,7 @@ function saveGpsSoon(){clearTimeout(gpsSaveTimer);gpsSaveTimer=setTimeout(()=>gp
 // A cleared marker prevents older session snapshots from resurrecting the track.
 async function clearSavedGpsTrack(){
   clearTimeout(gpsSaveTimer);clearTimeout(saveSessionTimer);
-  state.gpsTrack=[];
+  state.gpsTrack=[];gpsMatchCached=[];gpsMatchLastCount=-1;
   if(window.PostingNative)window.PostingNative.clearTrack();
   drawGpsTrack();
   if(!('indexedDB' in window))throw Error('この端末では保存領域を利用できません');
@@ -1194,39 +1194,59 @@ function scheduleGpsTrackDraw(){
   if(gpsRenderTimer!==null)return;
   gpsRenderTimer=setTimeout(()=>{gpsRenderTimer=null;drawGpsTrack()},900);
 }
+// Keep measured GPS visible independently of OSM availability or matcher failures.
+// A raw GPS line is evidence of measured positions, not proof of the street walked.
+function gpsRawLines(points){
+  const lines=[];let line=[];
+  const flush=()=>{if(line.length>1)lines.push(line);line=[]};
+  for(const p of points){
+    if(!Number.isFinite(p.lat)||!Number.isFinite(p.lon))continue;
+    const prev=line.length?line._last:null;
+    if(prev){
+      const dt=(Number(p.t)-Number(prev.t))/1000;
+      const distance=haversine(prev.lat,prev.lon,p.lat,p.lon);
+      // Avoid fictitious connectors across missing fixes, stale sessions or GPS jumps.
+      if(!Number.isFinite(dt)||dt<=0||dt>120||distance>Math.max(100,dt*5+30))flush();
+    }
+    line.push([p.lat,p.lon]);line._last=p;
+  }
+  flush();return lines;
+}
+let gpsMatchLastCount=-1,gpsMatchLastRoadCount=-1,gpsMatchLastAt=0,gpsMatchCached=[];
 function drawGpsTrack(){
-  for(const name of ['gpsTrack','gpsTrackPoint','gpsUnmatched','gpsRawTrack']){
-    state.layers[name]?.remove();state.layers[name]=null;
-  }
   const raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
-  if(!raw.length)return;
-  if(raw.length===1){state.layers.gpsTrackPoint=L.circleMarker([raw[0].lat,raw[0].lon],{radius:7,color:'#6d28d9',fillColor:'#7c3aed',fillOpacity:1,weight:2}).addTo(map);return}
-  let result={matched:[],unmatched:[]};
-  if(state.osmRoadSegments.length){
-    try{
-      // Keep the entire recorded walk visible, including sessions >350 fixes.
-      result=gpsDisplayTrack();
-    }catch(e){console.warn('GPS道路補正失敗',e)}
+  // Draw the complete measured track first. This must never depend on OSM.
+  const rawLines=gpsRawLines(raw);
+  const rawLayer=rawLines.length?L.polyline(rawLines,{color:'#f97316',weight:5,opacity:.9,
+    lineCap:'round',lineJoin:'round',interactive:false}).addTo(map):null;
+  const pointLayer=raw.length?L.circleMarker([raw.at(-1).lat,raw.at(-1).lon],{
+    radius:5,color:'#9a3412',fillColor:'#fb923c',fillOpacity:1,weight:2,interactive:false}).addTo(map):null;
+  // Do not destroy the visible track before its replacement is ready.
+  state.layers.gpsRawTrack?.remove();state.layers.gpsRawTrack=rawLayer;
+  state.layers.gpsTrackPoint?.remove();state.layers.gpsTrackPoint=pointLayer;
+  state.layers.gpsUnmatched?.remove();state.layers.gpsUnmatched=null;
+  if(!raw.length){state.layers.gpsTrack?.remove();state.layers.gpsTrack=null;gpsMatchCached=[];gpsMatchLastCount=-1;return}
+  // Road matching can be costly on Android. Recalculate periodically, but
+  // keep the measured line continuously visible between calculations.
+  const now=Date.now(),roadCount=state.osmRoadSegments.length;
+  if(gpsMatchLastCount>raw.length){gpsMatchCached=[];gpsMatchLastCount=-1;}
+  const shouldMatch=roadCount>0&&(gpsMatchLastRoadCount!==roadCount||
+    (gpsMatchLastCount!==raw.length&&now-gpsMatchLastAt>=12000));
+  if(shouldMatch){
+    gpsMatchLastAt=now;gpsMatchLastCount=raw.length;gpsMatchLastRoadCount=roadCount;
+    try{gpsMatchCached=gpsDisplayTrack().matched||[]}
+    catch(e){console.warn('GPS道路補正失敗（GPS実測線は維持）',e)}
   }
-  if(result.matched.length){
-    state.layers.gpsTrack=L.polyline(result.matched,{color:'#7c3aed',weight:8,opacity:1,lineCap:'round',lineJoin:'round'}).addTo(map);
-  }
-  // Unmatched samples remain visible as individual dots, NOT an invented
-  // straight route. Limit markers to keep Leaflet usable on Android.
-  const samples=raw.slice(-350);
-  const dots=L.layerGroup();
-  for(let i=0;i<samples.length;i+=Math.max(1,Math.ceil(samples.length/175))){
-    const p=samples[i];
-    L.circleMarker([p.lat,p.lon],{radius:5,color:'#6d28d9',fillColor:'#a78bfa',fillOpacity:.9,weight:1,interactive:false}).addTo(dots);
-  }
-  state.layers.gpsUnmatched=dots.addTo(map);
-  state.layers.gpsTrack?.bringToFront?.();
+  const matchedLayer=gpsMatchCached.length?L.polyline(gpsMatchCached,{
+    color:'#7c3aed',weight:7,opacity:1,lineCap:'round',lineJoin:'round',interactive:false}).addTo(map):null;
+  state.layers.gpsTrack?.remove();state.layers.gpsTrack=matchedLayer;
+  state.layers.gpsTrackPoint?.bringToFront?.();
   const gpsInfo=$('gpsStatus');
-  if(gpsInfo&&raw.length>1&&!result.matched.length){
-    const reason=state.osmRoadSegments.length?'道路の接続判定が未成立':'周辺の道路データを取得できていません';
-    gpsInfo.textContent=`GPS ${raw.length}点を保存済み / ${reason}。道路追従線は未生成です。`;
+  if(gpsInfo&&raw.length>1&&!gpsMatchCached.length){
+    gpsInfo.textContent=`GPS ${raw.length}点を記録済み / オレンジ線は実測軌跡、紫線は道路補正済み区間です。`;
   }
 }
+
 async function restoreFieldSession(){const generation=state.kmzUploadGeneration;const x=await sessionGet();if(!x||generation!==state.kmzUploadGeneration)return;state.restoring=true;state.kmzBlob=x.kmzBlob||null;state.geojson=x.geojson||null;state.areaGeojson=x.areaGeojson||null;state.summary=x.summary||null;state.areaInfo=x.areaInfo||{};state.workerId=+x.workerId||1;state.completed=new Set(x.completed||[]);state.fieldGuideLeg=+x.fieldGuideLeg||0;state.activeGuideLeg=+x.activeGuideLeg||0;state.guidePassed=new Set(x.guidePassed||[]);restoreServicePasses(x.servicePasses);state.gpsTrack=Array.isArray(x.gpsTrack)?x.gpsTrack:[];state.roadPasses=x.roadPasses||{};state.gpsTrackingDesired=!!x.gpsTrackingDesired;if(x.startLat&&x.startLon)setStartPoint(+x.startLat,+x.startLon);if(x.areas?.length){$('area').innerHTML=x.areas.map(a=>`<option>${escapeHtml(a)}</option>`).join('');$('area').disabled=false;$('build').disabled=false;$('refreshOsm').disabled=false;if(x.selectedArea)$('area').value=x.selectedArea}if(state.areaGeojson){renderAreaBoundaries(false);renderHouseholdInfo()}if(state.geojson){renderGeneratedMap();renderMetrics();renderDownloads();prepareWorkerUI();loadWorker(state.workerId,{preserveProgress:true});restoreServicePasses(x.servicePasses);state.guidePassed=new Set(x.guidePassed||[]);drawGuideProgress();drawGpsTrack();status('status','前回の作業状態を自動復元しました。','success')}drawGpsTrack();loadGpsRoadNetwork(x.selectedArea||$('area')?.value);state.restoring=false;/* KMZ auto-upload intentionally disabled: user initiated uploads are authoritative. */if(state.gpsTrackingDesired)setTimeout(()=>startGpsTracking(true),500)}
 
 async function osmDb(){return new Promise((resolve,reject)=>{const req=indexedDB.open('posting-navigator-osm',1);req.onupgradeneeded=()=>{if(!req.result.objectStoreNames.contains('snapshots'))req.result.createObjectStore('snapshots')};req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error)})}
