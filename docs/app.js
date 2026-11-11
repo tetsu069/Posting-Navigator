@@ -1196,33 +1196,81 @@ function scheduleGpsTrackDraw(){
 }
 // Keep measured GPS visible independently of OSM availability or matcher failures.
 // A raw GPS line is evidence of measured positions, not proof of the street walked.
-function gpsRawLines(points){
-  const lines=[];let line=[];
-  const flush=()=>{if(line.length>1)lines.push(line);line=[]};
-  for(const p of points){
-    if(!Number.isFinite(p.lat)||!Number.isFinite(p.lon))continue;
-    const prev=line.length?line._last:null;
-    if(prev){
-      const dt=(Number(p.t)-Number(prev.t))/1000;
-      const distance=haversine(prev.lat,prev.lon,p.lat,p.lon);
-      // Avoid fictitious connectors across missing fixes, stale sessions or GPS jumps.
-      if(!Number.isFinite(dt)||dt<=0||dt>120||distance>Math.max(100,dt*5+30))flush();
+// v1.9.57: display-only correction. Keep all original GPS fixes unchanged.
+// A sufficiently long straight chord is replaced only when a plausible OSM
+// path is available; otherwise it stays visible (dashed if suspicious).
+let gpsVisualCacheKey='',gpsVisualCache=null;
+function gpsVisualLines(points){
+  const key=`${points.length}:${points.at(-1)?.t}:${state.osmRoadSegments.length}`;
+  if(key===gpsVisualCacheKey&&gpsVisualCache)return gpsVisualCache;
+  const solid=[],uncertain=[];let run=[],dashed=[];
+  const flush=()=>{if(run.length>1)solid.push(run);if(dashed.length>1)uncertain.push(dashed);run=[];dashed=[]};
+  const append=(target,path)=>{
+    if(target.length&&haversine(target.at(-1)[0],target.at(-1)[1],path[0][0],path[0][1])>1)target.push(path[0]);
+    target.push(...(target.length?path.slice(1):path));
+  };
+  for(let i=0;i<points.length;i++){
+    const p=points[i];if(!Number.isFinite(p.lat)||!Number.isFinite(p.lon)){flush();continue}
+    const coord=[p.lat,p.lon];
+    if(!i){run=[coord];continue}
+    const prev=points[i-1],dt=(Number(p.t)-Number(prev.t))/1000;
+    const distance=haversine(prev.lat,prev.lon,p.lat,p.lon);
+    if(!Number.isFinite(dt)||dt<=0||dt>120||distance>Math.max(100,dt*5+30)){
+      flush();run=[coord];continue;
     }
-    line.push([p.lat,p.lon]);line._last=p;
+    // Skip tiny fixes. For longer intervals, a straight chord may cut corners.
+    // Only consider an OSM detour when the chord midpoint is away from roads.
+    let roadPath=null,suspect=false;
+    if(distance>=28&&distance<=160&&dt>=5&&state.osmRoadSegments.length){
+      try{
+        const midpoint={lat:(prev.lat+p.lat)/2,lon:(prev.lon+p.lon)/2,accuracy:12};
+        const midpointRoad=gpsCandidates(midpoint)[0];
+        suspect=!midpointRoad||midpointRoad.d>11;
+        if(suspect){
+          const as=gpsCandidates(prev).slice(0,3),bs=gpsCandidates(p).slice(0,3);
+          let best=null,score=Infinity;
+          for(const a of as)for(const b of bs){
+            if(a.d>22||b.d>22)continue;
+            const candidate=gpsRoadPath(a,b,Math.min(300,distance*2.6+25));
+            if(!candidate)continue;
+            const length=gpsPathLength(candidate);
+            if(length<distance*.85||length>distance*2.6+20||length>dt*4.5+20)continue;
+            const s=length+a.d*2+b.d*2;
+            if(s<score){score=s;best=candidate}
+          }
+          if(best)roadPath=best;
+        }
+      }catch(e){console.warn('GPS表示補正をスキップ',e)}
+    }
+    if(roadPath){
+      // Preserve visible endpoints even when the projected OSM line is offset.
+      if(dashed.length>1){uncertain.push(dashed);dashed=[]}
+      append(run,[[prev.lat,prev.lon],...roadPath,[p.lat,p.lon]]);
+    }else if(suspect&&distance>=45){
+      if(run.length>1)solid.push(run);
+      run=[coord];uncertain.push([[prev.lat,prev.lon],coord]);
+    }else{
+      if(dashed.length>1){uncertain.push(dashed);dashed=[]}
+      if(!run.length)run=[[prev.lat,prev.lon]];
+      run.push(coord);
+    }
   }
-  flush();return lines;
+  flush();
+  gpsVisualCacheKey=key;gpsVisualCache={solid,uncertain};return gpsVisualCache;
 }
 let gpsMatchLastCount=-1,gpsMatchLastRoadCount=-1,gpsMatchLastAt=0,gpsMatchCached=[];
 function drawGpsTrack(){
   const raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
   // Draw the complete measured track first. This must never depend on OSM.
-  const rawLines=gpsRawLines(raw);
-  const rawLayer=rawLines.length?L.polyline(rawLines,{color:'#f97316',weight:5,opacity:.9,
+  const visual=gpsVisualLines(raw);
+  const rawLayer=visual.solid.length?L.polyline(visual.solid,{color:'#f97316',weight:5,opacity:.9,
     lineCap:'round',lineJoin:'round',interactive:false}).addTo(map):null;
+  const uncertainLayer=visual.uncertain.length?L.polyline(visual.uncertain,{color:'#f97316',weight:4,opacity:.85,dashArray:'7 7',interactive:false}).addTo(map):null;
   const pointLayer=raw.length?L.circleMarker([raw.at(-1).lat,raw.at(-1).lon],{
     radius:5,color:'#9a3412',fillColor:'#fb923c',fillOpacity:1,weight:2,interactive:false}).addTo(map):null;
   // Do not destroy the visible track before its replacement is ready.
   state.layers.gpsRawTrack?.remove();state.layers.gpsRawTrack=rawLayer;
+  state.layers.gpsRawUncertain?.remove();state.layers.gpsRawUncertain=uncertainLayer;
   state.layers.gpsTrackPoint?.remove();state.layers.gpsTrackPoint=pointLayer;
   state.layers.gpsUnmatched?.remove();state.layers.gpsUnmatched=null;
   if(!raw.length){state.layers.gpsTrack?.remove();state.layers.gpsTrack=null;gpsMatchCached=[];gpsMatchLastCount=-1;return}
