@@ -1,7 +1,7 @@
 const configured=(window.POSTING_NAVIGATOR_API||'').replace(/\/$/,'');
 const API=configured || location.origin;
 const $=id=>document.getElementById(id);
-const state={uploadId:null,jobId:null,geojson:null,areaGeojson:null,summary:null,projectId:null,shareCode:null,workerId:1,watchId:null,current:null,completed:new Set(),segments:[],segmentLengths:[],layers:{},syncTimer:null,config:{gps_threshold_m:18,sync_interval_ms:5000},areaInfo:{},fieldGuideLeg:0,lastPosition:null,sessionToken:localStorage.getItem('pn_session')||'',user:null,navLegs:[],startPickMode:false,activeGuideLeg:0,forceOsmRefresh:false,guidePassed:new Set(),servicePasses:new Map(),kmzBlob:null,gpsTrack:[],gpsTrackingDesired:false,roadPasses:{},restoring:false,kmzUploadGeneration:0,osmRoadSegments:[],osmRoadArea:null,gpsTiles:new Set(),gpsTilesLoading:new Set(),gpsRoadGraph:null};
+const state={uploadId:null,jobId:null,geojson:null,areaGeojson:null,summary:null,projectId:null,shareCode:null,workerId:1,watchId:null,current:null,completed:new Set(),segments:[],segmentLengths:[],layers:{},syncTimer:null,config:{gps_threshold_m:18,sync_interval_ms:5000},areaInfo:{},fieldGuideLeg:0,lastPosition:null,sessionToken:localStorage.getItem('pn_session')||'',user:null,navLegs:[],startPickMode:false,activeGuideLeg:0,forceOsmRefresh:false,guidePassed:new Set(),servicePasses:new Map(),kmzBlob:null,gpsTrack:[],gpsTrackingDesired:false,roadPasses:{},restoring:false,kmzUploadGeneration:0,osmRoadSegments:[],osmRoadArea:null,gpsTiles:new Set(),gpsTilesLoading:new Set(),gpsRoadGraph:null,importedTracks:[]};
 const map=L.map('map').setView([35.7005,139.6925],16);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'© OpenStreetMap contributors'}).addTo(map);
 
@@ -1196,11 +1196,31 @@ function scheduleGpsTrackDraw(){
 }
 // Keep measured GPS visible independently of OSM availability or matcher failures.
 // A raw GPS line is evidence of measured positions, not proof of the street walked.
+// v1.9.58: display-only outlier suppression; raw fixes are untouched.
 // v1.9.57: display-only correction. Keep all original GPS fixes unchanged.
 // A sufficiently long straight chord is replaced only when a plausible OSM
 // path is available; otherwise it stays visible (dashed if suspicious).
 let gpsVisualCacheKey='',gpsVisualCache=null;
+// Suppress only isolated GPS spikes: A->B->C where A and C are close,
+// B is far away, and the elapsed time is short. Preserve B in the recording.
+function gpsVisualCleanPoints(points){
+  if(points.length<3)return points;
+  const out=[];
+  for(let i=0;i<points.length;i++){
+    const a=points[i-1],b=points[i],c=points[i+1];
+    if(!a||!c){out.push(b);continue}
+    const ab=haversine(a.lat,a.lon,b.lat,b.lon),bc=haversine(b.lat,b.lon,c.lat,c.lon);
+    const ac=haversine(a.lat,a.lon,c.lat,c.lon);
+    const dt=(c.t-a.t)/1000;
+    // Clearly implausible return spike; not an ordinary corner or a U-turn.
+    if(dt>0&&dt<=55&&ab>=14&&bc>=14&&ac<=Math.min(13,Math.min(ab,bc)*.32)
+      &&ab+bc>=Math.max(42,ac*4))continue;
+    out.push(b);
+  }
+  return out;
+}
 function gpsVisualLines(points){
+  points=gpsVisualCleanPoints(points);
   const key=`${points.length}:${points.at(-1)?.t}:${state.osmRoadSegments.length}`;
   if(key===gpsVisualCacheKey&&gpsVisualCache)return gpsVisualCache;
   const solid=[],uncertain=[];let run=[],dashed=[];
@@ -1615,7 +1635,95 @@ function startGpsTracking(restored=false){if(window.PostingNative){state.gpsTrac
 $('gpsStart').onclick=()=>startGpsTracking(false);
 $('gpsStop').onclick=()=>{if(window.PostingNative)window.PostingNative.stopTracking();state.gpsTrackingDesired=false;if(state.watchId!==null&&state.watchId!==-1)navigator.geolocation.clearWatch(state.watchId);state.watchId=null;$('gpsStart').disabled=false;$('gpsStop').disabled=true;saveFieldSessionSoon();status('gpsStatus','GPS追跡を停止しました。')};
 function angleDiff(a,b){return Math.abs(((a-b+540)%360)-180)}
-function onPosition(p){const lat=p.coords.latitude,lon=p.coords.longitude;ensureGpsRoadCoverage(lat,lon);const heading=Number.isFinite(p.coords.heading)?p.coords.heading:null;state.current={lat,lon,accuracy:p.coords.accuracy,heading};const prev=state.gpsTrack.at(-1);if(!prev||haversine(prev.lat,prev.lon,lat,lon)>=2){state.gpsTrack.push({lat,lon,t:p.timestamp||Date.now(),accuracy:p.coords.accuracy});if(state.gpsTrack.length>12000)state.gpsTrack=state.gpsTrack.slice(-12000);scheduleGpsTrackDraw();saveGpsSoon();saveFieldSessionSoon();}if(state.layers.gps)state.layers.gps.remove();state.layers.gps=L.marker([lat,lon],{icon:L.divIcon({className:'',html:'<div class="gps-marker"></div>',iconSize:[18,18],iconAnchor:[9,9]})}).addTo(map);if($('autoFollow').checked)map.panTo([lat,lon]);const observed=observeRoadMotion(state.lastPosition,{lat,lon},p.coords.accuracy);if(observed){drawFieldRoute();updateFieldProgress();pushProgress()}advanceFieldGuide();nextRouteInstruction();state.lastPosition={lat,lon};status('gpsStatus',`GPS追跡中 / 記録: ${state.gpsTrack.length}点\n精度: ±${Math.round(p.coords.accuracy)}m / 案内: ${Math.min((state.fieldGuideLeg||0)+1,state.navLegs.length)}番`,'success')}
+function onPosition(p){const lat=p.coords.latitude,lon=p.coords.longitude;ensureGpsRoadCoverage(lat,lon);const heading=Number.isFinite(p.coords.heading)?p.coords.heading:null;state.current={lat,lon,accuracy:p.coords.accuracy,heading};const prev=state.gpsTrack.at(-1);if(!prev||haversine(prev.lat,prev.lon,lat,lon)>=2){state.gpsTrack.push({lat,lon,t:p.timestamp||Date.now(),accuracy:p.coords.accuracy});if(state.gpsTrack.length>12000)state.gpsTrack=state.gpsTrack.slice(-12000);scheduleGpsTrackDraw();saveGpsSoon();saveFieldSessionSoon();}if(state.layers.gps)state.layers.gps.remove();state.layers.gps=L.marker([lat,lon],{icon:L.divIcon({className:'',html:'<div class="gps-marker"></div>',iconSize:[18,18],iconAnchor:[9,9]})}).addTo(map);/* v1.9.58: no automatic map recenter while recording */const observed=observeRoadMotion(state.lastPosition,{lat,lon},p.coords.accuracy);if(observed){drawFieldRoute();updateFieldProgress();pushProgress()}advanceFieldGuide();nextRouteInstruction();state.lastPosition={lat,lon};status('gpsStatus',`GPS追跡中 / 記録: ${state.gpsTrack.length}点\n精度: ±${Math.round(p.coords.accuracy)}m / 案内: ${Math.min((state.fieldGuideLeg||0)+1,state.navLegs.length)}番`,'success')}
+
+// --- v1.9.58: manual recenter and independent history overlays ---
+$('centerGps').onclick=()=>{
+  const p=state.current||state.gpsTrack.at(-1);
+  if(!p){status('gpsStatus','現在地がまだ取得できていません。','error');return}
+  map.setView([p.lat,p.lon],Math.max(map.getZoom(),16),{animate:true});
+};
+const historyColors=['#2563eb','#16a34a','#a21caf','#dc2626','#0891b2','#a16207','#4f46e5'];
+let importedTrackLayers=L.layerGroup().addTo(map);
+function historyStore(){return new Promise((resolve,reject)=>{const r=indexedDB.open('posting-navigator-history',1);r.onupgradeneeded=()=>r.result.createObjectStore('tracks',{keyPath:'id'});r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)})}
+async function historyAll(){const db=await historyStore();return await new Promise((resolve,reject)=>{const r=db.transaction('tracks','readonly').objectStore('tracks').getAll();r.onsuccess=()=>resolve(r.result||[]);r.onerror=()=>reject(r.error)})}
+async function historySave(t){const db=await historyStore();return await new Promise((resolve,reject)=>{const tx=db.transaction('tracks','readwrite');tx.objectStore('tracks').put(t);tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)})}
+async function historyDelete(id){const db=await historyStore();return await new Promise((resolve,reject)=>{const tx=db.transaction('tracks','readwrite');tx.objectStore('tracks').delete(id);tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)})}
+function validTrackPoint(lat,lon,t=0){lat=Number(lat);lon=Number(lon);if(!Number.isFinite(lat)||!Number.isFinite(lon)||Math.abs(lat)>90||Math.abs(lon)>180)return null;return {lat,lon,t:Number(t)||0}}
+function parseHistoryFile(name,content){
+  const ext=name.toLowerCase().split('.').pop();const paths=[];
+  if(ext==='gpx'||ext==='kml'){
+    const xml=new DOMParser().parseFromString(content,'application/xml');
+    if(xml.querySelector('parsererror'))throw Error('XML形式が正しくありません');
+    const local=(el,n)=>[...el.children].find(x=>x.localName===n);
+    if(ext==='gpx'){
+      // Keep each track segment separate: never bridge a recording break.
+      let segments=[...xml.getElementsByTagName('*')].filter(x=>x.localName==='trkseg');
+      if(!segments.length)segments=[...xml.getElementsByTagName('*')].filter(x=>x.localName==='rte');
+      for(const seg of segments){const pts=[...seg.getElementsByTagName('*')].filter(x=>x.localName==='trkpt'||x.localName==='rtept').map(x=>validTrackPoint(x.getAttribute('lat'),x.getAttribute('lon'),Date.parse(local(x,'time')?.textContent||'')||0)).filter(Boolean);if(pts.length)paths.push(pts)}
+    }else{
+      for(const line of [...xml.getElementsByTagName('*')].filter(x=>x.localName==='LineString')){
+        const coord=[...line.getElementsByTagName('*')].find(x=>x.localName==='coordinates')?.textContent||'';
+        const pts=coord.trim().split(/\s+/).map(t=>{const [lon,lat]=t.split(',');return validTrackPoint(lat,lon)}).filter(Boolean);if(pts.length)paths.push(pts);
+      }
+      // gx:Track: coordinates stored as lon lat altitude
+      for(const track of [...xml.getElementsByTagName('*')].filter(x=>x.localName==='Track')){
+        const pts=[...track.children].filter(x=>x.localName==='coord').map(x=>{const [lon,lat]=x.textContent.trim().split(/\s+/);return validTrackPoint(lat,lon)}).filter(Boolean);if(pts.length)paths.push(pts);
+      }
+    }
+  }else if(ext==='geojson'||ext==='json'){
+    const j=JSON.parse(content);
+    function geom(g){if(!g)return;if(g.type==='LineString')paths.push(g.coordinates.map(c=>validTrackPoint(c[1],c[0])).filter(Boolean));else if(g.type==='MultiLineString')g.coordinates.forEach(c=>geom({type:'LineString',coordinates:c}));else if(g.type==='GeometryCollection')g.geometries.forEach(geom)}
+    if(j.type==='FeatureCollection')j.features.forEach(f=>geom(f.geometry));else if(j.type==='Feature')geom(j.geometry);else if(j.type==='LineString'||j.type==='MultiLineString'||j.type==='GeometryCollection')geom(j);
+    else if(Array.isArray(j.points))paths.push(j.points.map(p=>validTrackPoint(p.lat??p.latitude,p.lon??p.lng??p.longitude,p.t??p.timestamp)).filter(Boolean));
+  }else if(ext==='csv'){
+    const rows=content.replace(/^\uFEFF/,'').trim().split(/\r?\n/).map(r=>r.split(','));
+    const hdr=rows.shift().map(x=>x.trim().toLowerCase().replace(/["']/g,''));
+    const ix=hdr.findIndex(x=>['lat','latitude','緯度'].includes(x)),iy=hdr.findIndex(x=>['lon','lng','longitude','経度'].includes(x));
+    if(ix<0||iy<0)throw Error('CSVに緯度・経度列がありません');
+    const it=hdr.findIndex(x=>['time','timestamp','t','日時'].includes(x));
+    paths.push(rows.map(r=>validTrackPoint(r[ix],r[iy],it>=0?(Date.parse(r[it])||Number(r[it])):0)).filter(Boolean));
+  }else throw Error('対応形式: GPX / KML / GeoJSON / CSV');
+  const clean=paths.filter(p=>p.length>=2);
+  if(!clean.length)throw Error('線として表示できる軌跡が見つかりません');
+  return clean;
+}
+function exportGpsTrack(){
+  const pts=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+  if(!pts.length){status('gpsStatus','エクスポートするGPS軌跡がありません。','error');return}
+  const esc=x=>String(x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c]));
+  const xml='<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Posting Navigator" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>Posting Navigator GPS</name><trkseg>'+pts.map(p=>'<trkpt lat="'+p.lat+'" lon="'+p.lon+'"><time>'+new Date(Number(p.t)||Date.now()).toISOString()+'</time></trkpt>').join('')+'</trkseg></trk></gpx>';
+  const url=URL.createObjectURL(new Blob([xml],{type:'application/gpx+xml'}));const a=document.createElement('a');a.href=url;a.download='PostingNavigator_'+new Date().toISOString().slice(0,10)+'.gpx';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);
+}
+$('exportGps').onclick=exportGpsTrack;
+async function renderHistory(){
+  const tracks=(await historyAll()).sort((a,b)=>a.created-b.created);
+  importedTrackLayers.clearLayers();
+  const host=$('historyList');host.replaceChildren();
+  for(let i=0;i<tracks.length;i++){
+    const t=tracks[i],color=historyColors[i%historyColors.length];
+    if(t.visible!==false){for(const path of t.paths){L.polyline(path.map(p=>[p.lat,p.lon]),{color,weight:4,opacity:.78,interactive:false}).addTo(importedTrackLayers)}}
+    const row=document.createElement('div');row.style.cssText='display:flex;align-items:center;gap:6px;margin:6px 0;';
+    const toggle=document.createElement('input');toggle.type='checkbox';toggle.checked=t.visible!==false;toggle.onchange=async()=>{t.visible=toggle.checked;await historySave(t);renderHistory()};
+    const name=document.createElement('span');name.textContent=t.name;name.title=t.name;name.style.cssText='flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:'+color;
+    const del=document.createElement('button');del.type='button';del.textContent='削除';del.className='secondary';del.onclick=async()=>{if(!confirm('この過去軌跡を削除しますか？'))return;await historyDelete(t.id);renderHistory()};
+    row.append(toggle,name,del);host.appendChild(row);
+  }
+  if(!tracks.length)host.textContent='過去の軌跡はまだありません。';
+}
+$('importGps').onchange=async e=>{
+  const files=[...e.target.files];let ok=0,failed=[];
+  for(const file of files){try{
+    if(file.size>25*1024*1024)throw Error('25MBを超えています');
+    const paths=parseHistoryFile(file.name,await file.text());
+    await historySave({id:Date.now()+'-'+Math.random().toString(36).slice(2),name:file.name,paths,created:Date.now(),visible:true});ok++;
+  }catch(err){failed.push(file.name+': '+err.message)}}
+  e.target.value='';await renderHistory();
+  status('gpsStatus',ok+'件の過去軌跡を読み込みました。'+(failed.length?' 読込不可: '+failed.join(' / '):''),failed.length?'error':'success');
+};
+renderHistory().catch(e=>console.warn('過去軌跡の復元失敗',e));
+// --- end v1.9.58 ---
+
 $('resetProgress').onclick=()=>{if(!confirm('この担当の進捗を0%に戻しますか？'))return;state.completed.clear();state.roadPasses={};drawFieldRoute();updateFieldProgress();pushProgress()};
 
 async function pushProgress(){if(!state.projectId)return;const m=updateFieldProgress();try{await api(`/api/projects/${state.projectId}/progress/${state.workerId}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({completed_segments:[...state.completed],completed_distance_m:m.done,lat:state.current?.lat,lon:state.current?.lon})})}catch(e){console.warn(e)}}
@@ -1630,7 +1738,7 @@ function setupGoogleLogin(){const cid=state.config.google_client_id;if(!cid){$('
 function renderLogin(){if(state.user){$('loginBox').innerHTML=`<button id="logout" class="ghost">${escapeHtml(state.user.name||state.user.email)} ▾</button>`;$('logout').onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'})}catch{}state.sessionToken='';state.user=null;localStorage.removeItem('pn_session');$('myProjectsBox').classList.add('hidden');renderLogin()}}else if(window.google){$('loginBox').innerHTML='<div id="googleBtn"></div>';google.accounts.id.renderButton($('googleBtn'),{theme:'outline',size:'medium',text:'signin_with',shape:'pill'})}}
 
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'){saveFieldSession();gpsTrackPut();}else{drawGpsTrack();if(state.gpsTrackingDesired&&state.watchId===null)startGpsTracking(true)}});window.addEventListener('pagehide',()=>{saveFieldSession();gpsTrackPut()});
-let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.55',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
+let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$('installBtn').classList.add('hidden')};if('serviceWorker'in navigator)window.addEventListener('load',async()=>{try{const r=await navigator.serviceWorker.register('service-worker.js?v=1.9.58',{updateViaCache:'none'});await r.update()}catch(e){console.warn(e)}});
 
 function haversine(lat1,lon1,lat2,lon2){const R=6371000,p=Math.PI/180,dLat=(lat2-lat1)*p,dLon=(lon2-lon1)*p,a=Math.sin(dLat/2)**2+Math.cos(lat1*p)*Math.cos(lat2*p)*Math.sin(dLon/2)**2;return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))}
 function pointSegmentMeters(lat,lon,lat1,lon1,lat2,lon2){const mLat=(lat+lat1+lat2)/3*Math.PI/180,x=(v)=>v*Math.PI/180*6371000*Math.cos(mLat),y=(v)=>v*Math.PI/180*6371000;const px=x(lon),py=y(lat),ax=x(lon1),ay=y(lat1),bx=x(lon2),by=y(lat2),dx=bx-ax,dy=by-ay;const t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/(dx*dx+dy*dy||1)));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy))}

@@ -8,13 +8,13 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-  <link rel="stylesheet" href="style.css?v=1.9.57">
+  <link rel="stylesheet" href="style.css?v=1.9.58">
 </head>
 <body>
 <div class="app-shell">
   <header class="topbar">
     <div><h1>Posting Navigator</h1><p>ルート作成・GPS進捗・進捗共有</p></div>
-    <div class="top-actions"><span class="badge">v1.9.57</span><button type="button" id="checkAppUpdate" class="ghost" title="最新バージョンを確認して読み込みます">最新版を確認</button><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
+    <div class="top-actions"><span class="badge">v1.9.58</span><button type="button" id="checkAppUpdate" class="ghost" title="最新バージョンを確認して読み込みます">最新版を確認</button><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
   </header>
 
   <main class="layout">
@@ -64,7 +64,13 @@
         <select id="fieldWorker"></select>
         <div class="row buttons"><button id="gpsStart">GPS開始</button><button id="gpsStop" class="danger" disabled>GPS停止</button></div>
         <button id="clearGpsTrack" type="button" class="secondary">GPS軌跡を消去（巡回ルート・進捗は残す）</button>
-        <label class="check"><input id="autoFollow" type="checkbox" checked> 現在地を地図中央に追従</label>
+        <div class="hint">地図は自由に移動できます。現在地に戻るときは地図右上の現在地ボタンを押してください。</div>
+        <label>GPS軌跡の保存・読み込み</label>
+        <button id="exportGps" type="button" class="secondary">現在のGPS軌跡をGPXでエクスポート</button>
+        <label for="importGps">過去の軌跡を読み込む（複数選択可）</label>
+        <input id="importGps" type="file" accept=".gpx,.kml,.geojson,.json,.csv" multiple>
+        <div class="hint">GPX / KML / GeoJSON / CSV対応。読み込んだ軌跡は端末内に保存され、複数重ねて表示できます。非表示・削除も可能です。</div>
+        <div id="historyList"></div>
         <label>完了判定距離</label>
         <div class="row"><input id="gpsThreshold" type="range" min="8" max="40" value="18"><div class="range-value"><span id="gpsThresholdText">18</span>m</div></div>
         <div id="householdProgress" class="household-progress hidden"><div><span>推定配布済み</span><b id="householdDone">—</b></div><div><span>推定残り</span><b id="householdRemain">—</b></div><small>GPS巡回進捗からの按分推定です</small></div><div id="nextGuide" class="next-guide hidden"></div><div id="gpsStatus" class="status">ルート生成後、担当を選択してGPSを開始してください。</div>
@@ -85,11 +91,11 @@
       </section>
     </aside>
 
-    <section class="panel map-panel"><button type="button" id="toggleMapFullscreen" class="map-fullscreen-toggle" aria-pressed="false">地図を全画面表示</button><div id="map"></div></section>
+    <section class="panel map-panel" style="position:relative"><button type="button" id="toggleMapFullscreen" class="map-fullscreen-toggle" aria-pressed="false">地図を全画面表示</button><div id="map"></div><button id="centerGps" type="button" title="現在地を地図中央に表示" aria-label="現在地を中央に表示" style="position:absolute;right:12px;top:62px;z-index:1000;background:white;color:#0f172a;border:1px solid #cbd5e1;border-radius:10px;padding:10px 14px;box-shadow:0 2px 8px #0002;font-size:16px;cursor:pointer">◎ 現在地</button></section>
   </main>
 </div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="config.js?v=1.9.57"></script>
-<script src="app.js?v=1.9.57"></script>
+<script src="config.js?v=1.9.58"></script>
+<script src="app.js?v=1.9.58"></script>
 </body>
 </html>
