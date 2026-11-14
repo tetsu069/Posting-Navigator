@@ -1688,14 +1688,52 @@ function parseHistoryFile(name,content){
   if(!clean.length)throw Error('線として表示できる軌跡が見つかりません');
   return clean;
 }
+// v1.9.63: Keep raw imported points intact; split only their display geometry.
+// GPX can contain multiple sessions inside one trkseg (including our own exports).
+function historyDisplayPaths(paths){
+  const output=[];
+  for(const path of paths||[]){
+    let run=[];
+    const flush=()=>{if(run.length>=2)output.push(run);run=[]};
+    for(let i=0;i<path.length;i++){
+      const p=path[i];
+      if(!Number.isFinite(p.lat)||!Number.isFinite(p.lon)){flush();continue}
+      if(run.length){
+        const prev=run[run.length-1];
+        const d=haversine(prev.lat,prev.lon,p.lat,p.lon);
+        const dt=p.t>0&&prev.t>0?(p.t-prev.t)/1000:null;
+        // Never bridge a recording pause, teleport, or a very long missing section.
+        if(d>120 || (dt!==null&&(dt<=0||dt>90||(dt>0&&d/dt>9))))flush();
+      }
+      // A single bad GPS fix returning immediately creates the sideways spikes.
+      const next=path[i+1];
+      if(run.length&&next&&Number.isFinite(next.lat)&&Number.isFinite(next.lon)){
+        const prev=run[run.length-1];
+        const outward=haversine(prev.lat,prev.lon,p.lat,p.lon);
+        const back=haversine(p.lat,p.lon,next.lat,next.lon);
+        const bypass=haversine(prev.lat,prev.lon,next.lat,next.lon);
+        if(outward>14&&back>14&&bypass<Math.min(15,Math.max(outward,back)*.35))continue;
+      }
+      run.push(p);
+    }
+    flush();
+  }
+  return output;
+}
 function exportGpsTrack(){
-  const pts=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
-  if(!pts.length){status('gpsStatus','エクスポートするGPS軌跡がありません。','error');return}
-  const esc=x=>String(x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c]));
-  const xml='<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Posting Navigator" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>Posting Navigator GPS</name><trkseg>'+pts.map(p=>'<trkpt lat="'+p.lat+'" lon="'+p.lon+'"><time>'+new Date(Number(p.t)||Date.now()).toISOString()+'</time></trkpt>').join('')+'</trkseg></trk></gpx>';
-  const filename='PostingNavigator_'+new Date().toISOString().slice(0,10)+'.gpx';
+  // Export the actual displayed orange geometry, not the raw GPS fixes.
+  // Each rendered run is a separate GPX trkseg: never bridge a gap.
+  const raw=state.gpsTrack.filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lon));
+  if(!raw.length){status('gpsStatus','エクスポートするGPS軌跡がありません。','error');return}
+  const visual=gpsVisualLines(raw);
+  const paths=[...(visual.solid||[]),...(visual.uncertain||[])].filter(path=>path.length>=2);
+  if(!paths.length){status('gpsStatus','線として保存できる軌跡がありません。','error');return}
+  const segments=paths.map(path=>'<trkseg>'+path.filter(p=>Number.isFinite(p[0])&&Number.isFinite(p[1])).map(p=>'<trkpt lat="'+p[0]+'" lon="'+p[1]+'"/>').join('')+'</trkseg>').join('');
+  // Marker tells our importer these are already-rendered coordinates.
+  const xml='<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Posting Navigator Display v1.9.64" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>Posting Navigator displayed track</name>'+segments+'</trk></gpx>';
+  const filename='PostingNavigator_display_'+new Date().toISOString().slice(0,10)+'.gpx';
   if(window.PostingNative&&typeof window.PostingNative.saveGpx==='function'){
-    try{window.PostingNative.saveGpx(xml,filename);status('gpsStatus','Androidの保存先選択画面を開いています…');}
+    try{window.PostingNative.saveGpx(xml,filename);status('gpsStatus','表示中の軌跡をGPXに書き出します。保存先を選択してください。')}
     catch(e){status('gpsStatus','GPX保存を開始できません: '+e.message,'error')}
     return;
   }
@@ -1708,7 +1746,7 @@ async function renderHistory(){
   const host=$('historyList');host.replaceChildren();
   for(let i=0;i<tracks.length;i++){
     const t=tracks[i],color=historyColors[i%historyColors.length];
-    if(t.visible!==false){for(const path of t.paths){L.polyline(path.map(p=>[p.lat,p.lon]),{color,weight:4,opacity:.78,interactive:false}).addTo(importedTrackLayers)}}
+    if(t.visible!==false){for(const path of (t.displayExact?t.paths:historyDisplayPaths(t.paths))){L.polyline(path.map(p=>[p.lat,p.lon]),{color,weight:4,opacity:.78,interactive:false}).addTo(importedTrackLayers)}}
     const row=document.createElement('div');row.style.cssText='display:flex;align-items:center;gap:6px;margin:6px 0;';
     const toggle=document.createElement('input');toggle.type='checkbox';toggle.checked=t.visible!==false;toggle.onchange=async()=>{t.visible=toggle.checked;await historySave(t);renderHistory()};
     const name=document.createElement('span');name.textContent=t.name;name.title=t.name;name.style.cssText='flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:'+color;
@@ -1722,8 +1760,10 @@ $('importGps').onchange=async e=>{
   const files=[...e.target.files];let ok=0,failed=[];
   for(const file of files){try{
     if(file.size>25*1024*1024)throw Error('25MBを超えています');
-    const paths=parseHistoryFile(file.name,await file.text());
-    await historySave({id:Date.now()+'-'+Math.random().toString(36).slice(2),name:file.name,paths,created:Date.now(),visible:true});ok++;
+    const content=await file.text();
+    const paths=parseHistoryFile(file.name,content);
+    const displayExact=/creator="Posting Navigator Display v1\.9\.64"/.test(content);
+    await historySave({displayExact,id:Date.now()+'-'+Math.random().toString(36).slice(2),name:file.name,paths,created:Date.now(),visible:true});ok++;
   }catch(err){failed.push(file.name+': '+err.message)}}
   e.target.value='';await renderHistory();
   status('gpsStatus',ok+'件の過去軌跡を読み込みました。'+(failed.length?' 読込不可: '+failed.join(' / '):''),failed.length?'error':'success');
