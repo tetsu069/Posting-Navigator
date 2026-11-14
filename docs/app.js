@@ -1747,11 +1747,17 @@ async function renderHistory(){
   for(let i=0;i<tracks.length;i++){
     const t=tracks[i],color=historyColors[i%historyColors.length];
     if(t.visible!==false){for(const path of (t.displayExact?t.paths:historyDisplayPaths(t.paths))){L.polyline(path.map(p=>[p.lat,p.lon]),{color,weight:4,opacity:.78,interactive:false}).addTo(importedTrackLayers)}}
-    const row=document.createElement('div');row.style.cssText='display:flex;align-items:center;gap:6px;margin:6px 0;';
-    const toggle=document.createElement('input');toggle.type='checkbox';toggle.checked=t.visible!==false;toggle.onchange=async()=>{t.visible=toggle.checked;await historySave(t);renderHistory()};
-    const name=document.createElement('span');name.textContent=t.name;name.title=t.name;name.style.cssText='flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:'+color;
-    const del=document.createElement('button');del.type='button';del.textContent='削除';del.className='secondary';del.onclick=async()=>{if(!confirm('この過去軌跡を削除しますか？'))return;await historyDelete(t.id);renderHistory()};
-    row.append(toggle,name,del);host.appendChild(row);
+    const row=document.createElement('div');row.style.cssText='display:flex;align-items:center;gap:10px;padding:10px 8px;margin:6px 0;border:1px solid #cbd5e1;border-radius:9px;min-width:0;background:rgba(148,163,184,.07)';
+    const toggle=document.createElement('input');toggle.type='checkbox';toggle.checked=t.visible!==false;toggle.setAttribute('aria-label',`${t.name||'名称不明'}を地図に表示`);toggle.style.cssText='flex:0 0 auto;width:18px;height:18px';toggle.onchange=async()=>{t.visible=toggle.checked;await historySave(t);renderHistory()};
+    const details=document.createElement('div');details.style.cssText='flex:1;min-width:0;display:flex;flex-direction:column;gap:4px';
+    const name=document.createElement('div');name.textContent=t.name||'名称不明の軌跡';name.title=t.name||'';name.style.cssText='font-size:13px;font-weight:700;overflow-wrap:anywhere;word-break:break-word;line-height:1.35;color:'+color;
+    const meta=document.createElement('div');meta.style.cssText='font-size:11px;color:#64748b;line-height:1.4';
+    const created=Number(t.created);const when=Number.isFinite(created)?new Date(created).toLocaleString('ja-JP',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'日時不明';
+    const count=(t.paths||[]).reduce((sum,p)=>sum+(p?.length||0),0);
+    meta.textContent=`取込: ${when} ・ ${count}点 ・ ${t.visible!==false?'表示中':'非表示'}`;
+    details.append(name,meta);
+    const del=document.createElement('button');del.type='button';del.textContent='削除';del.className='secondary';del.style.cssText='flex:0 0 auto';del.setAttribute('aria-label',`${t.name||'名称不明の軌跡'}を削除`);del.onclick=async()=>{if(!confirm(`「${t.name||'名称不明の軌跡'}」を削除しますか？\n※インポート履歴のみ削除します。元のGPXファイルは消えません。`))return;await historyDelete(t.id);renderHistory()};
+    row.append(toggle,details,del);host.appendChild(row);
   }
   if(!tracks.length)host.textContent='過去の軌跡はまだありません。';
 }
