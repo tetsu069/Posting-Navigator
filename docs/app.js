@@ -1747,17 +1747,18 @@ async function renderHistory(){
   for(let i=0;i<tracks.length;i++){
     const t=tracks[i],color=historyColors[i%historyColors.length];
     if(t.visible!==false){for(const path of (t.displayExact?t.paths:historyDisplayPaths(t.paths))){L.polyline(path.map(p=>[p.lat,p.lon]),{color,weight:4,opacity:.78,interactive:false}).addTo(importedTrackLayers)}}
-    const row=document.createElement('div');row.style.cssText='display:flex;align-items:center;gap:10px;padding:10px 8px;margin:6px 0;border:1px solid #cbd5e1;border-radius:9px;min-width:0;background:rgba(148,163,184,.07)';
-    const toggle=document.createElement('input');toggle.type='checkbox';toggle.checked=t.visible!==false;toggle.setAttribute('aria-label',`${t.name||'名称不明'}を地図に表示`);toggle.style.cssText='flex:0 0 auto;width:18px;height:18px';toggle.onchange=async()=>{t.visible=toggle.checked;await historySave(t);renderHistory()};
-    const details=document.createElement('div');details.style.cssText='flex:1;min-width:0;display:flex;flex-direction:column;gap:4px';
-    const name=document.createElement('div');name.textContent=t.name||'名称不明の軌跡';name.title=t.name||'';name.style.cssText='font-size:13px;font-weight:700;overflow-wrap:anywhere;word-break:break-word;line-height:1.35;color:'+color;
-    const meta=document.createElement('div');meta.style.cssText='font-size:11px;color:#64748b;line-height:1.4';
+    const row=document.createElement('div');row.style.cssText='display:block;width:100%;box-sizing:border-box;padding:12px;margin:8px 0;border:1px solid #cbd5e1;border-radius:9px;min-width:0;background:rgba(148,163,184,.07)';
+    const name=document.createElement('div');name.textContent=t.name||'名称不明の軌跡';name.title=t.name||'';name.style.cssText='display:block;width:100%;box-sizing:border-box;font-size:14px;font-weight:700;white-space:normal;overflow-wrap:break-word;word-break:normal;line-height:1.5;color:'+color;
+    const meta=document.createElement('div');meta.style.cssText='display:block;width:100%;box-sizing:border-box;font-size:12px;color:#64748b;line-height:1.5;margin-top:5px;white-space:normal';
     const created=Number(t.created);const when=Number.isFinite(created)?new Date(created).toLocaleString('ja-JP',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'日時不明';
     const count=(t.paths||[]).reduce((sum,p)=>sum+(p?.length||0),0);
-    meta.textContent=`取込: ${when} ・ ${count}点 ・ ${t.visible!==false?'表示中':'非表示'}`;
-    details.append(name,meta);
-    const del=document.createElement('button');del.type='button';del.textContent='削除';del.className='secondary';del.style.cssText='flex:0 0 auto';del.setAttribute('aria-label',`${t.name||'名称不明の軌跡'}を削除`);del.onclick=async()=>{if(!confirm(`「${t.name||'名称不明の軌跡'}」を削除しますか？\n※インポート履歴のみ削除します。元のGPXファイルは消えません。`))return;await historyDelete(t.id);renderHistory()};
-    row.append(toggle,details,del);host.appendChild(row);
+    meta.textContent=`取込: ${when} / ${count}点`;
+    const actions=document.createElement('div');actions.style.cssText='display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-top:10px;width:100%;box-sizing:border-box';
+    const showLabel=document.createElement('label');showLabel.style.cssText='display:inline-flex;align-items:center;gap:8px;width:auto;max-width:100%;min-width:0;margin:0;padding:0;font-size:13px;cursor:pointer;white-space:nowrap';
+    const toggle=document.createElement('input');toggle.type='checkbox';toggle.checked=t.visible!==false;toggle.setAttribute('aria-label',`${t.name||'名称不明'}を地図に表示`);toggle.style.cssText='display:inline-block;flex:none;width:20px!important;height:20px!important;min-width:20px!important;margin:0!important';toggle.onchange=async()=>{t.visible=toggle.checked;await historySave(t);renderHistory()};
+    const showText=document.createElement('span');showText.textContent=t.visible!==false?'地図に表示中':'非表示';showText.style.cssText='white-space:nowrap';showLabel.append(toggle,showText);
+    const del=document.createElement('button');del.type='button';del.textContent='この履歴を削除';del.className='secondary';del.style.cssText='display:inline-block!important;flex:0 0 auto!important;width:auto!important;max-width:100%!important;min-width:0!important;padding:8px 12px!important;margin:0!important;font-size:12px!important;line-height:1.4!important;white-space:nowrap!important';del.setAttribute('aria-label',`${t.name||'名称不明の軌跡'}を削除`);del.onclick=async()=>{if(!confirm(`「${t.name||'名称不明の軌跡'}」を削除しますか？\n※インポート履歴のみ削除します。元のGPXファイルは消えません。`))return;await historyDelete(t.id);renderHistory()};
+    actions.append(showLabel,del);row.append(name,meta,actions);host.appendChild(row);
   }
   if(!tracks.length)host.textContent='過去の軌跡はまだありません。';
 }
