@@ -1717,6 +1717,7 @@ async function renderHistory(){
   }
   if(!tracks.length)host.textContent='過去の軌跡はまだありません。';
 }
+$('importGpsButton').onclick=()=>$('importGps').click();
 $('importGps').onchange=async e=>{
   const files=[...e.target.files];let ok=0,failed=[];
   for(const file of files){try{

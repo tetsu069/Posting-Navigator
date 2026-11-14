@@ -8,13 +8,13 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-  <link rel="stylesheet" href="style.css?v=1.9.61">
+  <link rel="stylesheet" href="style.css?v=1.9.62">
 </head>
 <body>
 <div class="app-shell">
   <header class="topbar">
     <div><h1>Posting Navigator</h1><p>ルート作成・GPS進捗・進捗共有</p></div>
-    <div class="top-actions"><span class="badge">v1.9.61</span><button type="button" id="checkAppUpdate" class="ghost" title="最新バージョンを確認して読み込みます">最新版を確認</button><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
+    <div class="top-actions"><span class="badge">v1.9.62</span><button type="button" id="checkAppUpdate" class="ghost" title="最新バージョンを確認して読み込みます">最新版を確認</button><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
   </header>
 
   <main class="layout">
@@ -67,8 +67,8 @@
         <div class="hint">地図は自由に移動できます。現在地に戻るときは地図右上の現在地ボタンを押してください。</div>
         <label>GPS軌跡の保存・読み込み</label>
         <button id="exportGps" type="button" class="secondary">現在のGPS軌跡をGPXでエクスポート</button>
-        <label for="importGps">過去の軌跡を読み込む（複数選択可）</label>
-        <input id="importGps" type="file" accept=".gpx,.kml,.geojson,.json,.csv" multiple>
+        <button id="importGpsButton" type="button" class="secondary">過去の軌跡をインポート（複数選択可）</button>
+        <input id="importGps" type="file" accept=".gpx,.kml,.geojson,.json,.csv" multiple style="display:none" aria-label="過去の軌跡ファイル">
         <div class="hint">GPX / KML / GeoJSON / CSV対応。読み込んだ軌跡は端末内に保存され、複数重ねて表示できます。非表示・削除も可能です。</div>
         <div id="historyList"></div>
         <label>完了判定距離</label>
@@ -95,7 +95,7 @@
   </main>
 </div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="config.js?v=1.9.61"></script>
-<script src="app.js?v=1.9.61"></script>
+<script src="config.js?v=1.9.62"></script>
+<script src="app.js?v=1.9.62"></script>
 </body>
 </html>
