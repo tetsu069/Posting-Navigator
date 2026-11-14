@@ -1693,7 +1693,13 @@ function exportGpsTrack(){
   if(!pts.length){status('gpsStatus','エクスポートするGPS軌跡がありません。','error');return}
   const esc=x=>String(x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c]));
   const xml='<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Posting Navigator" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>Posting Navigator GPS</name><trkseg>'+pts.map(p=>'<trkpt lat="'+p.lat+'" lon="'+p.lon+'"><time>'+new Date(Number(p.t)||Date.now()).toISOString()+'</time></trkpt>').join('')+'</trkseg></trk></gpx>';
-  const url=URL.createObjectURL(new Blob([xml],{type:'application/gpx+xml'}));const a=document.createElement('a');a.href=url;a.download='PostingNavigator_'+new Date().toISOString().slice(0,10)+'.gpx';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);
+  const filename='PostingNavigator_'+new Date().toISOString().slice(0,10)+'.gpx';
+  if(window.PostingNative&&typeof window.PostingNative.saveGpx==='function'){
+    try{window.PostingNative.saveGpx(xml,filename);status('gpsStatus','Androidの保存先選択画面を開いています…');}
+    catch(e){status('gpsStatus','GPX保存を開始できません: '+e.message,'error')}
+    return;
+  }
+  const url=URL.createObjectURL(new Blob([xml],{type:'application/gpx+xml'}));const a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);
 }
 $('exportGps').onclick=exportGpsTrack;
 async function renderHistory(){
@@ -1820,3 +1826,5 @@ window.postingNavigatorNativePosition=function(p){
     }finally{button.disabled=false;}
   });
 })();
+
+window.postingNavigatorGpxSaveResult=function(result){status('gpsStatus',result.message,result.ok?'success':'error')};

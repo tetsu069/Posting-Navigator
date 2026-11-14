@@ -8,13 +8,13 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-  <link rel="stylesheet" href="style.css?v=1.9.58">
+  <link rel="stylesheet" href="style.css?v=1.9.60">
 </head>
 <body>
 <div class="app-shell">
   <header class="topbar">
     <div><h1>Posting Navigator</h1><p>ルート作成・GPS進捗・進捗共有</p></div>
-    <div class="top-actions"><span class="badge">v1.9.58</span><button type="button" id="checkAppUpdate" class="ghost" title="最新バージョンを確認して読み込みます">最新版を確認</button><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
+    <div class="top-actions"><span class="badge">v1.9.60</span><button type="button" id="checkAppUpdate" class="ghost" title="最新バージョンを確認して読み込みます">最新版を確認</button><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
   </header>
 
   <main class="layout">
@@ -91,11 +91,11 @@
       </section>
     </aside>
 
-    <section class="panel map-panel" style="position:relative"><button type="button" id="toggleMapFullscreen" class="map-fullscreen-toggle" aria-pressed="false">地図を全画面表示</button><div id="map"></div><button id="centerGps" type="button" title="現在地を地図中央に表示" aria-label="現在地を中央に表示" style="position:absolute;right:12px;top:62px;z-index:1000;background:white;color:#0f172a;border:1px solid #cbd5e1;border-radius:10px;padding:10px 14px;box-shadow:0 2px 8px #0002;font-size:16px;cursor:pointer">◎ 現在地</button></section>
+    <section class="panel map-panel" style="position:relative"><button type="button" id="toggleMapFullscreen" class="map-fullscreen-toggle" aria-pressed="false">地図を全画面表示</button><div id="map"></div><button id="centerGps" type="button" title="現在地を地図中央に表示" aria-label="現在地を中央に表示" style="position:absolute;right:16px;bottom:calc(20px + env(safe-area-inset-bottom, 0px));z-index:1000;display:flex;align-items:center;justify-content:center;width:44px;height:44px;min-width:44px;min-height:44px;padding:0;background:#fff;color:#0f172a;border:1px solid #cbd5e1;border-radius:50%;box-shadow:0 2px 8px #0003;font-size:25px;line-height:1;cursor:pointer" aria-hidden="false">◎</button></section>
   </main>
 </div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="config.js?v=1.9.58"></script>
-<script src="app.js?v=1.9.58"></script>
+<script src="config.js?v=1.9.60"></script>
+<script src="app.js?v=1.9.60"></script>
 </body>
 </html>
