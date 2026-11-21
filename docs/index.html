@@ -14,7 +14,7 @@
 <div class="app-shell">
   <header class="topbar">
     <div><h1>Posting Navigator</h1><p>ルート作成・GPS進捗・進捗共有</p></div>
-    <div class="top-actions"><span class="badge">v1.9.66</span><button type="button" id="checkAppUpdate" class="ghost" title="最新バージョンを確認して読み込みます">最新版を確認</button><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
+    <div class="top-actions"><span class="badge">v1.9.68</span><button type="button" id="checkAppUpdate" class="ghost" title="最新バージョンを確認して読み込みます">最新版を確認</button><button id="installBtn" class="ghost hidden">アプリをインストール</button><div id="loginBox"></div></div>
   </header>
 
   <main class="layout">
@@ -27,7 +27,7 @@
 
       <section id="tab-build" class="tabpane active">
         <label>1. 区画KMZ</label>
-        <input id="kmz" type="file" accept=".kmz">
+        <input id="kmz" type="file" accept=".kmz,application/vnd.google-earth.kmz,application/zip,application/octet-stream"><button id="uploadKmzNow" type="button" class="secondary" style="margin-top:8px">選択したKMZを読み込む</button><div id="kmzImmediate" class="status" style="margin-top:8px;overflow-wrap:anywhere" aria-live="polite">KMZを選択してください。</div>
         <div class="hint">KMZを読み込むと町丁目一覧を取得します。</div>
 
         <label>2. 対象町丁目</label>
@@ -63,6 +63,8 @@
         <label>担当者</label>
         <select id="fieldWorker"></select>
         <div class="row buttons"><button id="gpsStart">GPS開始</button><button id="gpsStop" class="danger" disabled>GPS停止</button></div>
+        <div id="gpsRecordingTime" class="hint" aria-live="off">GPS記録はまだありません。</div>
+        <details><summary>過去のGPS記録時間（端末内に保存）</summary><div id="gpsRecordingSessions"></div></details>
         <button id="clearGpsTrack" type="button" class="secondary">GPS軌跡を消去（巡回ルート・進捗は残す）</button>
         <div class="hint">地図は自由に移動できます。現在地に戻るときは地図右上の現在地ボタンを押してください。</div>
         <label>GPS軌跡の保存・読み込み</label>
@@ -96,6 +98,6 @@
 </div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="config.js?v=1.9.66"></script>
-<script src="app.js?v=1.9.66"></script>
+<script src="app.js?v=1.9.68"></script>
 </body>
 </html>
